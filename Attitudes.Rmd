@@ -1,0 +1,1482 @@
+---
+title: "Attitudes"
+output: html_document
+date: "2026-04-15"
+---
+
+```{r echo=FALSE, message=FALSE, warning=FALSE, include=TRUE}
+library(dplyr)
+library(tidyverse)
+library(kableExtra)
+library(lmtest)
+library(ggplot2)
+library(fixest)
+library(lfe)
+#rm(list=ls())
+options(tibble.width = Inf)
+options(width = 200)
+```
+
+```{r preliminaries, echo=FALSE}
+rm(list=ls()) #clean out memory 
+```
+
+## Google Trends Search
+
+Loading
+
+```{r}
+syria   <- read_csv("/Users/diananichvoloda/Library/CloudStorage/GoogleDrive-diananichvoloda@college.harvard.edu/My Drive/2025-2026/Econ 1425/PAPER/DATA/Syriasentiment1.csv")
+ukraine <- read_csv("/Users/diananichvoloda/Library/CloudStorage/GoogleDrive-diananichvoloda@college.harvard.edu/My Drive/2025-2026/Econ 1425/PAPER/DATA/Ukrainesentiment1.csv")
+
+df <- bind_rows(syria, ukraine)
+```
+
+```{r}
+library(tidyr)
+
+df_wide <- df %>%
+  select(year, refugee_group, avg_tone_hostile_proxy, share_strongly_negative) %>%
+  pivot_wider(names_from = refugee_group, values_from = c(avg_tone_hostile_proxy, share_strongly_negative))
+
+df_wide <- df_wide %>%
+  mutate(
+    tone_gap = avg_tone_hostile_proxy_ukraine - avg_tone_hostile_proxy_syria,
+    strong_neg_gap = share_strongly_negative_ukraine - share_strongly_negative_syria
+  )
+
+library(ggplot2)
+
+ggplot(df_wide, aes(x = year)) +
+  geom_line(aes(y = avg_tone_hostile_proxy_syria, color = "Syria")) +
+  geom_line(aes(y = avg_tone_hostile_proxy_ukraine, color = "Ukraine")) +
+  labs(
+    y = "Media tone (hostility proxy)",
+    color = "Group",
+    title = "Media tone toward refugees by origin"
+  )
+```
+
+Federal
+
+```{r}
+federal_afd_share <- readRDS("/Users/diananichvoloda/Library/CloudStorage/GoogleDrive-diananichvoloda@college.harvard.edu/My Drive/2025-2026/Econ 1425/PAPER/DATA/federal_muni_harm_25 (1).rds")
+
+national_df <- federal_afd_share %>%
+  filter(election_year >= 2013) %>%
+  mutate(
+    # Replace NA with 0 for fringe parties
+    afd = coalesce(afd, 0),
+    npd = coalesce(npd, 0),
+    rep = coalesce(rep, 0),
+    dvu = coalesce(dvu, 0),
+    die_rechte = coalesce(die_rechte, 0),
+
+    # Construct far-right composite at Kreis level
+    far_right_local = afd + npd + rep + dvu + die_rechte
+  ) %>%
+  group_by(election_year) %>%
+  summarize(
+    # Properly weighted national AfD share
+    afd_share = sum(afd * valid_votes, na.rm = TRUE) /
+                sum(valid_votes, na.rm = TRUE),
+
+    # Properly weighted national far-right share
+    far_right_share = sum(far_right_local * valid_votes, na.rm = TRUE) /
+                      sum(valid_votes, na.rm = TRUE)
+  ) %>%
+  rename(year = election_year) %>%
+  arrange(year)
+```
+
+```{r}
+library(dplyr)
+library(ggplot2)
+library(patchwork)
+library(scales)
+
+# ----------------------------
+# Clean media data
+# ----------------------------
+media_plot <- df_wide %>%
+  transmute(
+    year = as.numeric(year),
+    syria_hostility   = -avg_tone_hostile_proxy_syria,
+    ukraine_hostility = -avg_tone_hostile_proxy_ukraine
+  ) %>%
+  arrange(year)
+
+# ----------------------------
+# Clean vote data
+# ----------------------------
+afd_plot <- national_df %>%
+  transmute(
+    year = as.numeric(year),
+    afd_share = as.numeric(afd_share),
+    far_right_share = as.numeric(far_right_share)
+  ) %>%
+  distinct(year, .keep_all = TRUE) %>%
+  arrange(year)
+
+# ----------------------------
+# Define x-axis ticks (every other year)
+# ----------------------------
+year_ticks <- seq(2013, 2025, by = 2)
+
+# ----------------------------
+# Top plot
+# ----------------------------
+p1 <- ggplot(media_plot, aes(x = year)) +
+  geom_line(aes(y = syria_hostility, color = "Syria"), linewidth = 1) +
+  geom_point(aes(y = syria_hostility, color = "Syria"), size = 2) +
+  geom_line(aes(y = ukraine_hostility, color = "Ukraine"), linewidth = 1) +
+  geom_point(aes(y = ukraine_hostility, color = "Ukraine"), size = 2) +
+  scale_color_manual(values = c("Syria" = "#F8766D", "Ukraine" = "#00BFC4")) +
+  scale_x_continuous(breaks = year_ticks, limits = c(2013, 2025)) +
+  labs(
+    title = "Media hostility toward refugees by origin",
+    x = NULL,
+    y = "Refugee hostility",
+    color = "Group"
+  ) +
+  theme_minimal(base_size = 12) +  # smaller overall text
+  theme(
+    plot.title = element_text(size = 14, face = "bold"),
+    axis.title = element_text(size = 11),
+    axis.text = element_text(size = 10),
+    legend.title = element_text(size = 11),
+    legend.text = element_text(size = 10)
+  )
+
+# ----------------------------
+# Bottom plot
+# ----------------------------
+p2 <- ggplot(afd_plot, aes(x = year)) +
+  geom_line(aes(y = afd_share, color = "AfD", group = 1), linewidth = 1) +
+  geom_point(aes(y = afd_share, color = "AfD"), size = 2.5) +
+  geom_line(aes(y = far_right_share, color = "Far-right composite", group = 1),
+            linewidth = 1, linetype = "dashed") +
+  geom_point(aes(y = far_right_share, color = "Far-right composite"), size = 2) +
+  scale_color_manual(values = c("AfD" = "black", "Far-right composite" = "gray45")) +
+  scale_x_continuous(breaks = year_ticks, limits = c(2013, 2025)) +
+  scale_y_continuous(labels = percent_format(accuracy = 1)) +
+  labs(
+    title = "National far-right vote share",
+    x = "Year",
+    y = "Vote share",
+    color = NULL
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    plot.title = element_text(size = 14, face = "bold"),
+    axis.title = element_text(size = 11),
+    axis.text = element_text(size = 10),
+    legend.text = element_text(size = 10)
+  )
+
+# ----------------------------
+# Combine plots
+# ----------------------------
+final_plot <- p1 / p2 +
+  plot_layout(heights = c(1.2, 1))
+
+final_plot
+```
+
+```{r}
+library(dplyr)
+library(ggplot2)
+library(patchwork)
+library(scales)
+
+# ----------------------------
+# 1. Prepare data
+# ----------------------------
+media_plot <- df_wide %>%
+  transmute(
+    year = as.numeric(year),
+    syria_hostility   = -avg_tone_hostile_proxy_syria,
+    ukraine_hostility = -avg_tone_hostile_proxy_ukraine
+  ) %>%
+  arrange(year)
+
+afd_plot <- national_df %>%
+  transmute(
+    year = as.numeric(year),
+    afd_share = as.numeric(afd_share),
+    far_right_share = as.numeric(far_right_share)
+  ) %>%
+  distinct(year, .keep_all = TRUE) %>%
+  arrange(year)
+
+year_ticks <- seq(2013, 2025, by = 2)
+
+# ----------------------------
+# 2. Common theme
+# ----------------------------
+theme_journal <- theme_minimal(base_size = 11) +
+  theme(
+    plot.title = element_text(size = 14, face = "bold", hjust = 0),
+    axis.title = element_text(size = 11),
+    axis.text = element_text(size = 10, color = "black"),
+    legend.title = element_text(size = 11),
+    legend.text = element_text(size = 10),
+    legend.position = "right",
+    panel.grid.minor = element_blank(),
+    panel.grid.major.x = element_blank(),
+    panel.grid.major.y = element_line(color = "grey85", linewidth = 0.4),
+    axis.line = element_line(color = "black", linewidth = 0.3),
+    axis.ticks = element_line(color = "black", linewidth = 0.3),
+    strip.text = element_text(size = 11, face = "bold"),
+    plot.margin = margin(8, 12, 8, 8)
+  )
+
+# ----------------------------
+# 3. Top panel: media hostility
+# ----------------------------
+p1 <- ggplot(media_plot, aes(x = year)) +
+  geom_vline(xintercept = c(2015, 2022),
+             linetype = "dotted", color = "grey55", linewidth = 0.5) +
+  geom_line(aes(y = syria_hostility, color = "Syria"), linewidth = 1) +
+  geom_point(aes(y = syria_hostility, color = "Syria"), size = 2.2) +
+  geom_line(aes(y = ukraine_hostility, color = "Ukraine"), linewidth = 1) +
+  geom_point(aes(y = ukraine_hostility, color = "Ukraine"), size = 2.2) +
+  annotate("text", x = 2015, y = max(media_plot$syria_hostility, media_plot$ukraine_hostility, na.rm = TRUE) + 0.08,
+           label = "2015", size = 3, color = "grey35") +
+  annotate("text", x = 2022, y = max(media_plot$syria_hostility, media_plot$ukraine_hostility, na.rm = TRUE) + 0.08,
+           label = "2022", size = 3, color = "grey35") +
+  scale_color_manual(values = c("Syria" = "#D55E00", "Ukraine" = "#0072B2")) +
+  scale_x_continuous(breaks = year_ticks, limits = c(2013, 2025)) +
+  labs(
+    title = "Media hostility toward refugees by origin",
+    x = NULL,
+    y = "Hostility index\n(higher = more negative)",
+    color = NULL
+  ) +
+  coord_cartesian(clip = "off") +
+  theme_journal
+
+# ----------------------------
+# 4. Bottom panel: far-right vote share
+# ----------------------------
+p2 <- ggplot(afd_plot, aes(x = year)) +
+  geom_vline(xintercept = c(2015, 2022),
+             linetype = "dotted", color = "grey55", linewidth = 0.5) +
+  geom_line(aes(y = afd_share, color = "AfD", group = 1), linewidth = 1) +
+  geom_point(aes(y = afd_share, color = "AfD"), size = 2.4) +
+  geom_line(aes(y = far_right_share, color = "Far-right composite", group = 1),
+            linewidth = 0.9, linetype = "22") +
+  geom_point(aes(y = far_right_share, color = "Far-right composite"), size = 2) +
+  scale_color_manual(values = c("AfD" = "black", "Far-right composite" = "grey45")) +
+  scale_x_continuous(breaks = year_ticks, limits = c(2013, 2025)) +
+  scale_y_continuous(
+    labels = percent_format(accuracy = 1),
+    expand = expansion(mult = c(0.02, 0.08))
+  ) +
+  labs(
+    title = "National far-right vote share",
+    x = "Year",
+    y = "Vote share",
+    color = NULL
+  ) +
+  theme_journal
+
+# ----------------------------
+# 5. Combine
+# ----------------------------
+final_plot <- p1 / p2 +
+  plot_layout(heights = c(1.15, 1)) &
+  theme(legend.position = "right")
+
+final_plot
+```
+
+# Media Scraping
+
+```{r}
+library(readr)
+library(dplyr)
+library(stringr)
+
+syria   <- read_csv("/Users/diananichvoloda/Library/CloudStorage/GoogleDrive-diananichvoloda@college.harvard.edu/My Drive/2025-2026/Econ 1425/PAPER/DATA/Newspaper Data/Syria_newspapers_new.csv")
+ukraine <- read_csv("/Users/diananichvoloda/Library/CloudStorage/GoogleDrive-diananichvoloda@college.harvard.edu/My Drive/2025-2026/Econ 1425/PAPER/DATA/Newspaper Data/Ukraine_newspapers_new.csv")
+
+articles <- bind_rows(syria, ukraine) %>%
+  mutate(
+    refugee_group = str_to_lower(refugee_group),
+    year = as.integer(year)
+  )
+```
+
+```{r}
+articles <- articles %>%
+  filter(!is.na(url), str_detect(url, "^https?://")) %>%
+  distinct(url, .keep_all = TRUE)
+
+#install.packages("urltools")
+library(urltools)
+
+domain_counts <- articles %>%
+  mutate(domain = domain(url)) %>%
+  count(domain, sort = TRUE)
+
+domain_counts
+```
+
+```{r}
+articles <- articles %>%
+  mutate(
+    domain_clean = str_replace(SourceCommonName, "^www\\.", ""),
+    domain_clean = str_replace(domain_clean, 
+      "^(plus|blogs|cmk|faktenfinder|newsticker|blog|projekte|causa)\\.", "")
+  )
+
+articles %>%
+  count(domain_clean, sort = TRUE)
+```
+
+Scraping Articles
+
+```{r}
+#install.packages("rvest")
+#install.packages("xml2")
+library(rvest)
+library(xml2)
+library(stringr)
+library(dplyr)
+library(purrr)
+library(tibble)
+
+get_article_text <- function(url) {
+  tryCatch({
+    page <- read_html(url)
+    
+    title <- page %>%
+      html_element("title") %>%
+      html_text2()
+
+    text_parts <- page %>%
+      html_elements("article p, main p, .article p, .entry-content p, .post-content p") %>%
+      html_text2()
+
+    if (length(text_parts) < 5) {
+      text_parts <- page %>%
+        html_elements("p") %>%
+        html_text2()
+    }
+
+    tibble(
+      url = url,
+      title = ifelse(length(title) == 0, NA_character_, title),
+      text = str_squish(paste(text_parts, collapse = " "))
+    )
+  }, error = function(e) {
+    tibble(
+      url = url,
+      title = NA_character_,
+      text = NA_character_
+    )
+  })
+}
+
+test_urls <- articles %>%
+  slice(1:20) %>%
+  pull(url)
+
+test_scrape <- purrr::map_dfr(test_urls, get_article_text)
+
+test_scrape %>%
+  select(url, title, text)
+
+test_scrape %>%
+  mutate(text_length = nchar(text)) %>%
+  select(url, text_length)
+```
+
+```{r}
+test_scrape %>%
+  mutate(
+    text_length = nchar(text),
+    is_missing = is.na(text),
+    has_boilerplate = grepl("Artikel-Länge|Uneingeschränkter Zugriff", text)
+  ) %>%
+  summarize(
+    pct_missing = mean(is_missing),
+    pct_short = mean(text_length < 500, na.rm = TRUE),
+    pct_boilerplate = mean(has_boilerplate, na.rm = TRUE)
+  )
+```
+
+Full Scrape
+
+```{r}
+library(dplyr)
+library(stringr)
+library(purrr)
+library(rvest)
+library(xml2)
+library(tibble)
+library(readr)
+
+# --------------------------------
+# 1. Keep all current news-source domains
+# --------------------------------
+keep_domains <- c(
+  "t-online.de",
+  "tagesspiegel.de",
+  "welt.de",
+  "sueddeutsche.de",
+  "faz.net",
+  "focus.de",
+  "spiegel.de",
+  "tagesschau.de",
+  "zeit.de",
+  "jungewelt.de",
+  "bild.de",
+  "wallstreet-online.de",
+  "unsere-zeit.de",
+  "behoerden-spiegel.de",
+  "kino-zeit.de"
+)
+
+articles_keep <- articles %>%
+  filter(domain_clean %in% keep_domains) %>%
+  filter(!is.na(url)) %>%
+  distinct(url, .keep_all = TRUE)
+
+# --------------------------------
+# 2. Boilerplate patterns
+# --------------------------------
+boilerplate_pattern <- paste(
+  c(
+    "Artikel-Länge",
+    "Uneingeschränkter Zugriff",
+    "Jetzt abonnieren",
+    "Mehr zum Thema",
+    "Lesen Sie auch",
+    "© dpa",
+    "© picture alliance",
+    "Datenschutzerklärung",
+    "Impressum",
+    "Newsletter",
+    "Cookie"
+  ),
+  collapse = "|"
+)
+
+# --------------------------------
+# 3. Cleaning function
+# --------------------------------
+clean_article_text <- function(text) {
+  if (is.na(text)) return(NA_character_)
+  
+  text %>%
+    str_replace_all("\\s+", " ") %>%
+    str_replace_all("Artikel-Länge:.*?Zugriff", " ") %>%
+    str_replace_all("Jetzt abonnieren.*", " ") %>%
+    str_replace_all("Mehr zum Thema.*", " ") %>%
+    str_replace_all("Lesen Sie auch.*", " ") %>%
+    str_replace_all("©\\s*dpa.*", " ") %>%
+    str_replace_all("©\\s*picture alliance.*", " ") %>%
+    str_squish()
+}
+
+# --------------------------------
+# 4. Scraper
+# --------------------------------
+get_article_text <- function(url) {
+  tryCatch({
+    page <- read_html(url)
+    
+    title <- page %>%
+      html_element("title") %>%
+      html_text2()
+
+    text_parts <- page %>%
+      html_elements("article p, main p, .article p, .entry-content p, .post-content p") %>%
+      html_text2()
+
+    if (length(text_parts) < 5) {
+      text_parts <- page %>%
+        html_elements("p") %>%
+        html_text2()
+    }
+
+    raw_text <- str_squish(paste(text_parts, collapse = " "))
+    clean_text <- clean_article_text(raw_text)
+
+    tibble(
+      url = url,
+      title = ifelse(length(title) == 0, NA_character_, title),
+      raw_text = raw_text,
+      text = clean_text,
+      text_length = ifelse(is.na(clean_text), NA_integer_, nchar(clean_text)),
+      is_missing = is.na(clean_text) | clean_text == "",
+      has_boilerplate = ifelse(is.na(raw_text), NA, str_detect(raw_text, boilerplate_pattern))
+    )
+  }, error = function(e) {
+    tibble(
+      url = url,
+      title = NA_character_,
+      raw_text = NA_character_,
+      text = NA_character_,
+      text_length = NA_integer_,
+      is_missing = TRUE,
+      has_boilerplate = NA
+    )
+  })
+}
+
+# --------------------------------
+# 6. Full scrape
+# --------------------------------
+scraped_full <- map_dfr(articles_keep$url, \(u) {
+  Sys.sleep(1)
+  get_article_text(u)
+})
+
+# --------------------------------
+# 7. Merge text back to metadata
+# --------------------------------
+article_text_df <- articles_keep %>%
+  left_join(scraped_full, by = "url")
+
+# --------------------------------
+# 8. Clean dataset
+# --------------------------------
+article_text_clean <- article_text_df %>%
+  filter(!is_missing) %>%
+  filter(!is.na(text_length), text_length > 1000) %>%
+  filter(!has_boilerplate | is.na(has_boilerplate))
+
+# --------------------------------
+# 9. Save outputs
+# --------------------------------
+write_csv(article_text_df, "articles_scraped_raw.csv")
+write_csv(article_text_clean, "articles_scraped_clean.csv")
+
+
+
+# --------------------------------
+# 10. Diagnostics
+# --------------------------------
+article_text_df %>%
+  summarize(
+    n_total = n(),
+    n_missing = sum(is_missing, na.rm = TRUE),
+    n_boilerplate = sum(has_boilerplate, na.rm = TRUE),
+    n_clean = sum(!is_missing & text_length > 1000 & (!has_boilerplate | is.na(has_boilerplate)), na.rm = TRUE)
+  )
+
+article_text_df %>%
+  mutate(keep_clean = !is_missing & text_length > 1000 & (!has_boilerplate | is.na(has_boilerplate))) %>%
+  count(domain_clean, keep_clean, sort = TRUE)
+```
+
+```{r}
+article_text_clean <- article_text_clean %>%
+  distinct(url, .keep_all = TRUE)
+
+article_text_clean <- article_text_clean %>%
+  mutate(
+    text = gsub("©\\s*picture.*", "", text),
+    text = gsub("Lesezeit.*Min.*", "", text),
+    text = gsub("\\[\\[.*?\\]\\]", "", text),
+    text = stringr::str_squish(text)
+  )
+
+gabriel_input <- article_text_clean %>%
+  transmute(
+    id = row_number(),
+    year = year,
+    refugee_group = refugee_group,
+    source = domain_clean,
+    text = text
+  )
+
+closeAllConnections()
+gc()
+
+write_csv(gabriel_input, "~/Desktop/gabriel_input.csv")
+
+write_csv(article_text_clean, "~/Desktop/articles_scraped_clean.csv")
+```
+
+Ukraine scrape
+
+```{r}
+library(dplyr)
+
+articles_ukraine <- articles_keep %>%
+  filter(refugee_group == "ukraine") %>%
+  filter(!is.na(url)) %>%
+  distinct(url, .keep_all = TRUE)
+
+nrow(articles_ukraine)
+
+library(dplyr)
+library(stringr)
+library(purrr)
+library(rvest)
+library(xml2)
+library(tibble)
+library(readr)
+
+# --------------------------------
+# 1. Keep all current news-source domains, Ukraine only
+# --------------------------------
+keep_domains <- c(
+  "t-online.de",
+  "tagesspiegel.de",
+  "welt.de",
+  "sueddeutsche.de",
+  "faz.net",
+  "focus.de",
+  "spiegel.de",
+  "tagesschau.de",
+  "zeit.de",
+  "jungewelt.de",
+  "bild.de",
+  "wallstreet-online.de",
+  "unsere-zeit.de",
+  "behoerden-spiegel.de",
+  "kino-zeit.de"
+)
+
+articles_ukraine <- articles %>%
+  filter(refugee_group == "ukraine") %>%
+  filter(domain_clean %in% keep_domains) %>%
+  filter(!is.na(url)) %>%
+  distinct(url, .keep_all = TRUE)
+
+# --------------------------------
+# 2. Boilerplate patterns
+# --------------------------------
+boilerplate_pattern <- paste(
+  c(
+    "Artikel-Länge",
+    "Uneingeschränkter Zugriff",
+    "Jetzt abonnieren",
+    "Mehr zum Thema",
+    "Lesen Sie auch",
+    "© dpa",
+    "© picture alliance",
+    "Datenschutzerklärung",
+    "Impressum",
+    "Newsletter",
+    "Cookie"
+  ),
+  collapse = "|"
+)
+
+# --------------------------------
+# 3. Cleaning function
+# --------------------------------
+clean_article_text <- function(text) {
+  if (is.na(text)) return(NA_character_)
+  
+  text %>%
+    str_replace_all("\\s+", " ") %>%
+    str_replace_all("Artikel-Länge:.*?Zugriff", " ") %>%
+    str_replace_all("Jetzt abonnieren.*", " ") %>%
+    str_replace_all("Mehr zum Thema.*", " ") %>%
+    str_replace_all("Lesen Sie auch.*", " ") %>%
+    str_replace_all("©\\s*dpa.*", " ") %>%
+    str_replace_all("©\\s*picture alliance.*", " ") %>%
+    str_squish()
+}
+
+# --------------------------------
+# 4. Scraper
+# --------------------------------
+get_article_text <- function(url) {
+  tryCatch({
+    page <- read_html(url)
+    
+    title <- page %>%
+      html_element("title") %>%
+      html_text2()
+
+    text_parts <- page %>%
+      html_elements("article p, main p, .article p, .entry-content p, .post-content p") %>%
+      html_text2()
+
+    if (length(text_parts) < 5) {
+      text_parts <- page %>%
+        html_elements("p") %>%
+        html_text2()
+    }
+
+    raw_text <- str_squish(paste(text_parts, collapse = " "))
+    clean_text <- clean_article_text(raw_text)
+
+    tibble(
+      url = url,
+      title = ifelse(length(title) == 0, NA_character_, title),
+      raw_text = raw_text,
+      text = clean_text,
+      text_length = ifelse(is.na(clean_text), NA_integer_, nchar(clean_text)),
+      is_missing = is.na(clean_text) | clean_text == "",
+      has_boilerplate = ifelse(is.na(raw_text), NA, str_detect(raw_text, boilerplate_pattern))
+    )
+  }, error = function(e) {
+    tibble(
+      url = url,
+      title = NA_character_,
+      raw_text = NA_character_,
+      text = NA_character_,
+      text_length = NA_integer_,
+      is_missing = TRUE,
+      has_boilerplate = NA
+    )
+  })
+}
+
+# --------------------------------
+# 6. Full scrape, Ukraine only
+# --------------------------------
+scraped_ukraine <- map_dfr(articles_ukraine$url, \(u) {
+  Sys.sleep(1)
+  get_article_text(u)
+})
+
+# --------------------------------
+# 7. Merge text back to metadata
+# --------------------------------
+article_text_ukraine_df <- articles_ukraine %>%
+  left_join(scraped_ukraine, by = "url")
+
+# --------------------------------
+# 8. Clean dataset
+# --------------------------------
+article_text_ukraine_clean <- article_text_ukraine_df %>%
+  filter(!is_missing) %>%
+  filter(!is.na(text_length), text_length > 1000) %>%
+  filter(!has_boilerplate | is.na(has_boilerplate))
+
+# --------------------------------
+# 9. Save outputs
+# --------------------------------
+write_csv(article_text_ukraine_df, "articles_ukraine_scraped_raw.csv")
+write_csv(article_text_ukraine_clean, "articles_ukraine_scraped_clean.csv")ading Scored data
+```
+
+Loading Scored Data
+
+```{r}
+ratings <- read.csv("/Users/diananichvoloda/Library/CloudStorage/GoogleDrive-diananichvoloda@college.harvard.edu/My Drive/2025-2026/Econ 1425/PAPER/DATA/Text Data/5000_RATINGS/checkpoint.csv")
+
+library(dplyr)
+library(ggplot2)
+
+ratings %>%
+  group_by(year, refugee_type) %>%
+  summarise(
+    avg_sentiment = mean(anti_immigration_sentiment, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  ggplot(aes(x = year, y = avg_sentiment, color = refugee_type)) +
+  geom_line(size = 1) +
+  geom_point(size = 2) +
+  scale_color_manual(values = c(
+    "Ukrainian" = "steelblue",
+    "Syrian" = "darkred"
+  )) +
+  labs(
+    title = "Average Anti-Immigration Sentiment by Refugee Group",
+    x = "Year",
+    y = "Average Sentiment",
+    color = "Refugee Group"
+  ) +
+  theme_minimal(base_size = 13) +
+  theme(
+    legend.position = "bottom",
+    panel.grid.minor = element_blank()
+  )
+```
+
+```{r}
+ukraine_media <- read.csv("/Users/diananichvoloda/Library/CloudStorage/GoogleDrive-diananichvoloda@college.harvard.edu/My Drive/2025-2026/Econ 1425/PAPER/DATA/Newspaper Data/Ukraine_news_final.csv")
+
+syria_media <- read.csv("/Users/diananichvoloda/Library/CloudStorage/GoogleDrive-diananichvoloda@college.harvard.edu/My Drive/2025-2026/Econ 1425/PAPER/DATA/Newspaper Data/Syria_new_news.csv")
+
+new_extracted <- read.csv("/Users/diananichvoloda/Library/CloudStorage/GoogleDrive-diananichvoloda@college.harvard.edu/My Drive/2025-2026/Econ 1425/PAPER/DATA/Newspaper Data/new_extracted_articles_SAMPLE_5000.csv")
+unique(new_extracted$refugee_group)
+```
+
+```{r}
+before_scoring <- read.csv("/Users/diananichvoloda/Library/CloudStorage/GoogleDrive-diananichvoloda@college.harvard.edu/My Drive/2025-2026/Econ 1425/PAPER/DATA/Newspaper Data/new_extracted_articles_2015_2025.csv")
+all_scored <- read.csv("/Users/diananichvoloda/Library/CloudStorage/GoogleDrive-diananichvoloda@college.harvard.edu/My Drive/2025-2026/Econ 1425/PAPER/DATA/Newspaper Data/new_extracted_articles_2015_2025.csv") 
+
+
+all_scored <- all_scored %>%
+  select(-ends_with("_x")) %>%
+  rename_with(~ gsub("_y$", "", .x))
+
+library(dplyr)
+library(ggplot2)
+
+all_scored %>%
+  group_by(year, refugee_type) %>%
+  summarise(avg_sentiment = mean(anti_immigration_sentiment, na.rm = TRUE),
+            .groups = "drop") %>%
+  ggplot(aes(x = year, y = avg_sentiment, color = refugee_type)) +
+  geom_line(size = 1.2) +
+  geom_point() +
+  labs(
+    title = "Anti-Immigration Sentiment by Year",
+    x = "Year",
+    y = "Average Sentiment",
+    color = "Refugee Type"
+  ) +
+  theme_minimal()
+```
+
+Regressions/Tests
+
+```{r}
+model_fe2 <- feols(
+  anti_immigration_sentiment ~ refugee_type | year + SourceCommonName,
+  data = ratings
+)
+
+summary(model_fe2)
+
+model_event <- feols(
+  anti_immigration_sentiment ~ post_2022 * refugee_type | year + SourceCommonName,
+  cluster = ~SourceCommonName,
+  data = ratings
+)
+
+summary(model_event)
+
+library(modelsummary)
+library(gt)
+
+fe_rows <- data.frame(
+  term = c("Source FE", "Year FE"),
+  Baseline = c("Yes", "Yes"),
+  `Post-2022 Interaction` = c("Yes", "Yes"),
+  check.names = FALSE
+)
+
+modelsummary(
+  list(
+    "Baseline" = model_fe2,
+    "Post-2022 Interaction" = model_event
+  ),
+  coef_map = c(
+    "refugee_typeUkrainian" = "Ukrainian (vs. Syrian)",
+    "post_2022:refugee_typeUkrainian" = "Post-2022 × Ukrainian"
+  ),
+  add_rows = fe_rows,
+  gof_omit = ".*",
+  stars = TRUE,
+  statistic = "({std.error})",
+  output = "gt"
+) |>
+  tab_header(
+    title = "Media Sentiment Regressions"
+  ) |>
+  tab_source_note(
+    source_note = "Standard errors in parentheses."
+  ) |>
+  tab_options(
+    table.font.names = "Times New Roman"
+  )
+```
+
+Nice Plot
+
+```{r}
+library(broom)
+library(dplyr)
+library(ggplot2)
+
+coef_plot_data <- bind_rows(
+  tidy(model_fe2, conf.int = TRUE) %>%
+    mutate(model = "Baseline"),
+  tidy(model_event, conf.int = TRUE) %>%
+    mutate(model = "Post-2022 Interaction")
+) %>%
+  filter(term %in% c(
+    "refugee_typeUkrainian",
+    "post_2022:refugee_typeUkrainian"
+  )) %>%
+  mutate(
+    coefficient = recode(
+      term,
+      "refugee_typeUkrainian" = "Ukrainian vs. Syrian",
+      "post_2022:refugee_typeUkrainian" = "Post-2022 × Ukrainian"
+    ),
+    model = factor(model, levels = c("Baseline", "Post-2022 Interaction"))
+  )
+
+ggplot(coef_plot_data, aes(x = estimate, y = coefficient, color = coefficient)) +
+  geom_vline(xintercept = 0, linetype = "dashed") +
+  geom_point(size = 3) +
+  geom_errorbarh(aes(xmin = conf.low, xmax = conf.high), height = 0.15, size = 1) +
+  facet_wrap(~ model, ncol = 1) +
+  scale_color_manual(values = c(
+    "Ukrainian vs. Syrian" = "#5AAE61",        # dark green
+    "Post-2022 × Ukrainian" = "#1B7837"       # lighter green
+  )) +
+  labs(
+    title = "Media Sentiment Toward Refugees: Baseline and Post-2022 Estimates",
+    x = "Effect on Anti-Immigration Sentiment (95% CI)",
+    y = NULL,
+    color = NULL
+  ) +
+  theme_minimal(base_family = "Times New Roman") +
+  theme(
+    plot.title = element_text(face = "bold", hjust = 0.5, size = 16),
+    strip.text = element_text(face = "bold", size = 13),
+    legend.position = "bottom"
+  )
+```
+
+More regressions
+
+```{r}
+model_fe <- feols(
+  anti_immigration_sentiment ~ refugee_type | year,
+  data = ratings
+)
+
+summary(model_fe)
+
+model_fe2 <- feols(
+  anti_immigration_sentiment ~ refugee_type | year + SourceCommonName,
+  data = ratings
+)
+
+summary(model_fe2)
+```
+
+Post-2022
+
+```{r}
+ratings <- ratings %>%
+  mutate(post_2022 = ifelse(year >= 2022, 1, 0))
+
+library(fixest)
+
+model_fe2 <- feols(
+  anti_immigration_sentiment ~ refugee_type | year + SourceCommonName,
+  data = ratings
+)
+
+summary(model_fe2)
+
+model_event <- feols(
+  anti_immigration_sentiment ~ post_2022 * refugee_type | year + SourceCommonName,
+  cluster = ~SourceCommonName,
+  data = ratings
+)
+
+summary(model_event)
+```
+
+```{r}
+ratings <- ratings %>%
+  mutate(
+    post_2015 = ifelse(year >= 2015, 1, 0),
+    post_2022 = ifelse(year >= 2022, 1, 0)
+  )
+
+model_multi <- feols(
+  anti_immigration_sentiment ~ 
+    post_2015 * refugee_type +
+    post_2022 * refugee_type |
+    year + SourceCommonName,
+  cluster = ~SourceCommonName,
+  data = ratings
+)
+
+summary(model_multi)
+```
+
+# Outlets and Mapping
+
+```{r}
+library(dplyr)
+library(tidyr)
+
+# German Bundesländer names
+regions <- c(
+  "Baden-Württemberg","Bayern","Berlin","Brandenburg","Bremen","Hamburg",
+  "Hessen","Mecklenburg-Vorpommern","Niedersachsen","Nordrhein-Westfalen",
+  "Rheinland-Pfalz","Saarland","Sachsen","Sachsen-Anhalt",
+  "Schleswig-Holstein","Thüringen"
+)
+
+# --- Regional outlets ---
+regional_map <- tibble::tibble(
+  SourceCommonName = c(
+    "berliner-zeitung.de","tagesspiegel.de","morgenpost.de",
+    "rp-online.de","express.de",
+    "tz.de","merkur.de"
+  ),
+  region = c(
+    "Berlin","Berlin","Berlin",
+    "Nordrhein-Westfalen","Nordrhein-Westfalen",
+    "Bayern","Bayern"
+  ),
+  weight = 1,
+  scope = "regional"
+)
+
+# --- National outlets ---
+national_outlets <- c(
+  "bild.de","faz.net","focus.de","fr.de",
+  "n-tv.de","spiegel.de","stern.de",
+  "sueddeutsche.de","newsticker.sueddeutsche.de",
+  "t-online.de","welt.de","zeit.de"
+)
+
+# Equal-weight distribution across regions
+national_map <- expand.grid(
+  SourceCommonName = national_outlets,
+  region = regions
+) %>%
+  as_tibble() %>%
+  mutate(
+    weight = 1 / length(regions),
+    scope = "national"
+  )
+
+# Combine
+full_mapping <- bind_rows(regional_map, national_map)
+
+
+```
+
+Old data loading
+
+```{r}
+Iv_election_panel_state <- read.csv("/Users/diananichvoloda/Desktop/iv_total_new.csv")
+
+library(dplyr)
+
+state_labels <- c(
+  "1"  = "Schleswig-Holstein",
+  "2"  = "Hamburg",
+  "3"  = "Niedersachsen",
+  "4"  = "Bremen",
+  "5"  = "Nordrhein-Westfalen",
+  "6"  = "Hessen",
+  "7"  = "Rheinland-Pfalz",
+  "8"  = "Baden-Württemberg",
+  "9"  = "Bayern",
+  "10" = "Saarland",
+  "11" = "Berlin",
+  "12" = "Brandenburg",
+  "13" = "Mecklenburg-Vorpommern",
+  "14" = "Sachsen",
+  "15" = "Sachsen-Anhalt",
+  "16" = "Thüringen"
+)
+
+panel_filtered <- iv_election_panel_state %>%
+  filter(year >= 2017)
+
+
+```
+
+Ratings data
+
+```{r}
+library(dplyr)
+
+ratings_mapped <- ratings %>%
+  left_join(full_mapping, by = "SourceCommonName")
+
+sentiment_clean <- ratings_mapped %>%
+  mutate(
+    election_year = case_when(
+      year >= 2015 & year <= 2017 ~ 2017,
+      year >= 2018 & year <= 2021 ~ 2021,
+      year >= 2022 & year <= 2025 ~ 2025,
+      TRUE ~ NA_real_
+    ),
+    time_weight = case_when(
+      election_year == 2017 ~ year - 2015 + 1,
+      election_year == 2021 ~ year - 2018 + 1,
+      election_year == 2025 ~ year - 2022 + 1,
+      TRUE ~ NA_real_
+    ),
+    final_weight = weight * time_weight
+  ) %>%
+  filter(!is.na(election_year)) %>%
+  group_by(region, election_year, refugee_group) %>%
+  summarise(
+    avg_anti_immigration_sentiment =
+      weighted.mean(anti_immigration_sentiment, final_weight, na.rm = TRUE),
+    n_articles = n_distinct(url),
+    .groups = "drop"
+  )
+
+library(tidyr)
+
+sentiment_wide <- sentiment_clean %>%
+  select(region, election_year, refugee_group, avg_anti_immigration_sentiment) %>%
+  pivot_wider(
+    names_from = refugee_group,
+    values_from = avg_anti_immigration_sentiment,
+    names_prefix = "sentiment_"
+  )
+```
+
+County elections
+
+```{r}
+final_data <- panel_filtered %>%
+  left_join(
+    sentiment_wide,
+    by = c("state_name" = "region", "year" = "election_year")
+  )
+```
+
+Regression
+
+```{r}
+model <- feols(
+  afd ~ sentiment_syria + sentiment_ukraine |
+    AGS + year,
+  cluster = ~state_name,
+  data = final_data
+)
+
+summary(model)
+
+library(modelsummary)
+library(gt)
+
+fe_rows <- data.frame(
+  term = c("State FE", "Year FE"),
+  Model = c("Yes", "Yes"),
+  check.names = FALSE
+)
+
+modelsummary(
+  list("AfD vote share" = model),
+  coef_map = c(
+    "sentiment_syria" = "Sentiment (Syrian refugees)",
+    "sentiment_ukraine" = "Sentiment (Ukrainian refugees)"
+  ),
+  gof_omit = ".*",
+  add_rows = fe_rows,
+  stars = TRUE,
+  statistic = "({std.error})",
+  output = "gt"
+) |>
+  tab_header(
+    title = "Media Sentiment and AfD Vote Share"
+  ) |>
+  tab_source_note(
+    source_note = "Standard errors clustered at the state level."
+  ) |>
+  tab_options(
+    table.font.names = "Times New Roman"
+  )
+```
+
+```{r}
+model <- feols(
+  sentiment_syria ~ syria_per_voter |
+    AGS + year,
+  cluster = ~state_name,
+  data = final_data
+)
+
+summary(model)
+```
+
+```{r}
+model_s <- feols(
+  sentiment_syria ~ syria_per_voter |
+    AGS + year,
+  cluster = ~state_name,
+  data = final_data
+)
+
+summary(model_s)
+
+model_u <- feols(
+  sentiment_ukraine ~ ukraine_per_voter |
+    AGS + year,
+  cluster = ~state_name,
+  data = final_data
+)
+
+summary(model_u)
+
+library(modelsummary)
+library(gt)
+
+fe_rows <- data.frame(
+  term = c("State FE", "Year FE"),
+  `Syrian Sentiment` = c("Yes", "Yes"),
+  `Ukrainian Sentiment` = c("Yes", "Yes"),
+  check.names = FALSE
+)
+
+modelsummary(
+  list(
+    "Syrian Sentiment" = model_s,
+    "Ukrainian Sentiment" = model_u
+  ),
+  coef_map = c(
+    "syria_per_voter" = "Syrian refugees per voter",
+    "ukraine_per_voter" = "Ukrainian refugees per voter"
+  ),
+  add_rows = fe_rows,
+  gof_omit = ".*",
+  stars = TRUE,
+  statistic = "({std.error})",
+  output = "gt"
+) |>
+  tab_header(
+    title = "Local Refugee Presence and Media Sentiment"
+  ) |>
+  tab_source_note(
+    source_note = "Standard errors clustered at the state level."
+  ) |>
+  tab_options(
+    table.font.names = "Times New Roman"
+  )
+```
+
+Sentiment for Syria + AfD
+
+```{r}
+model <- feols(
+  afd ~ sentiment_syria * syria_per_voter |
+    AGS + year,
+  cluster = ~state_name,
+  data = final_data
+)
+
+summary(model)
+```
+
+Sentiment for Ukraine + AfD
+
+```{r}
+model <- feols(
+  afd ~ sentiment_ukraine * ukraine_per_voter |
+    AGS + year,
+  cluster = ~state_name,
+  data = final_data
+)
+
+summary(model)
+```
+
+Sentiment Gap
+
+```{r}
+final_data <- final_data %>%
+  mutate(
+    sentiment_gap = sentiment_syria - sentiment_ukraine
+  )
+
+model_gap <- feols(
+  afd ~ sentiment_gap + syria_per_voter + ukraine_per_voter |
+    AGS + year,
+  cluster = ~state_name,
+  data = final_data
+)
+
+summary(model_gap)
+
+library(modelsummary)
+library(gt)
+
+fe_rows <- data.frame(
+  term = c("State FE", "Year FE"),
+  Model = c("Yes", "Yes"),
+  check.names = FALSE
+)
+
+modelsummary(
+  list("AfD vote share" = model_gap),
+  coef_map = c(
+    "sentiment_gap" = "Sentiment gap (Syria − Ukraine)",
+    "syria_per_voter" = "Syrian refugees per voter",
+    "ukraine_per_voter" = "Ukrainian refugees per voter"
+  ),
+  add_rows = fe_rows,
+  gof_omit = ".*",
+  stars = TRUE,
+  statistic = "({std.error})",
+  output = "gt"
+) |>
+  tab_header(
+    title = "Media Sentiment, Refugee Inflows, and AfD Vote Share"
+  ) |>
+  tab_source_note(
+    source_note = "Standard errors clustered at the state level."
+  ) |>
+  tab_options(
+    table.font.names = "Times New Roman"
+  )
+```
+
+```{r}
+library(dplyr)
+
+plot_data <- final_data %>%
+  group_by(year) %>%
+  summarise(
+    sentiment_gap = mean(sentiment_gap, na.rm = TRUE),
+    afd = mean(afd, na.rm = TRUE)
+  )
+
+ggplot(plot_data, aes(x = year)) +
+  geom_line(aes(y = sentiment_gap, color = "Sentiment Gap"), size = 1.2) +
+  geom_point(aes(y = sentiment_gap, color = "Sentiment Gap")) +
+  
+  geom_line(aes(y = afd, color = "AfD Vote Share"), size = 1.2, linetype = "dashed") +
+  geom_point(aes(y = afd, color = "AfD Vote Share")) +
+  
+  labs(
+    title = "Media Sentiment Gap and AfD Vote Share Over Time",
+    x = "Year",
+    y = "Value",
+    color = ""
+  ) +
+  theme_minimal()
+```
+
+Yearly Plot
+
+```{r}
+library(dplyr)
+library(ggplot2)
+
+library(tidyr)
+
+yearly_gap <- yearly_sentiment %>%
+  pivot_wider(
+    names_from = refugee_group,
+    values_from = sentiment
+  ) %>%
+  mutate(
+    sentiment_gap = syria - ukraine
+  )
+
+ggplot(yearly_gap, aes(x = year, y = sentiment_gap)) +
+  geom_line(color = "darkblue", size = 1.2) +
+  geom_point() +
+  labs(
+    title = "Sentiment Gap (Syria - Ukraine) Over Time",
+    x = "Year",
+    y = "Sentiment Gap"
+  ) +
+  theme_minimal()
+```
+
+Regional breakdowns
+
+```{r}
+regional_sentiment <- ratings_mapped %>%
+  group_by(region, year, refugee_group) %>%
+  summarise(
+    sentiment = weighted.mean(anti_immigration_sentiment, weight, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+ggplot(regional_sentiment, aes(x = year, y = sentiment, color = refugee_group)) +
+  geom_line() +
+  facet_wrap(~region) +
+  scale_x_continuous(
+    breaks = c(2015, 2018, 2021, 2025),
+    labels = c("'15", "'18", "'21", "'25")
+  ) +
+  theme_minimal() +
+  labs(
+    title = "Sentiment by Region and Refugee Group",
+    x = "Year",
+    y = "Sentiment"
+  )
+```
+
+```{r}
+
+
+model_gap <- feols(
+  sentiment_syria ~ z_syria_2008_per_voter |
+    AGS + year,
+  cluster = ~state_name,
+  data = final_data
+)
+
+summary(model_gap)
+```
+
+# More graphs
+
+Unemployment
+
+```{r}
+library(ggplot2)
+library(dplyr)
+
+df <- data.frame(
+  origin = rep(c("Syria", "Ukraine"), each = 3),
+  unemployment = rep(c(4.275, 6.300, 9.600), 2),
+  effect = c(-0.324, -0.150, 0.134, -0.780, -0.534, -0.132)
+)
+
+ggplot(df, aes(x = unemployment, y = effect, color = origin)) +
+  geom_line(size = 1.2) +
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  scale_color_manual(values = c(
+    "Syria" = "#B22222",    # red
+    "Ukraine" = "#2C7FB8"   # blue
+  )) +
+  labs(
+    title = "Effect of Refugee Inflows on AfD Vote Share Across Unemployment Levels",
+    x = "Unemployment Rate (%)",
+    y = "Marginal Effect on AfD Vote Share",
+    color = "Refugee Origin"
+  ) +
+  theme_minimal(base_family = "Times New Roman") +
+  theme(
+    plot.title = element_text(face = "bold", hjust = 0.5),
+    legend.position = "bottom"
+  )
+```
+
+Income
+
+```{r}
+library(ggplot2)
+library(dplyr)
+
+df_income <- data.frame(
+  origin = rep(c("Syria", "Ukraine"), each = 3),
+  income = rep(c(105.664, 149.386, 236.513), 2),
+  effect = c(0.176, 0.115, -0.006, -0.048, -0.137, -0.315)
+)
+
+ggplot(df_income, aes(x = income, y = effect, color = origin)) +
+  geom_line(size = 1.2) +
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  scale_color_manual(values = c(
+    "Syria" = "#B22222",    # red
+    "Ukraine" = "#2C7FB8"   # blue
+  )) +
+  labs(
+    title = "Effect of Refugee Inflows on AfD Vote Share Across Income Levels",
+    x = "Disposable Household Income (thousands of euros)",
+    y = "Marginal Effect on AfD Vote Share",
+    color = "Refugee Origin"
+  ) +
+  theme_minimal(base_family = "Times New Roman") +
+  theme(
+    plot.title = element_text(face = "bold", hjust = 0.5),
+    legend.position = "bottom"
+  )
+```

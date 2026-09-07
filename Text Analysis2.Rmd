@@ -1,0 +1,4514 @@
+---
+title: "Text Analysis"
+output: html_document
+date: "2026-04-15"
+---
+
+```{r echo=FALSE, message=FALSE, warning=FALSE, include=TRUE}
+library(dplyr)
+library(tidyverse)
+library(kableExtra)
+library(lmtest)
+library(ggplot2)
+library(fixest)
+library(lfe)
+#rm(list=ls())
+options(tibble.width = Inf)
+options(width = 200)
+```
+
+```{r preliminaries, echo=FALSE}
+rm(list=ls()) #clean out memory 
+```
+
+## Baden Wurttemberg
+
+Loading data
+
+```{r}
+# replace with your actual path
+BadenWurttemberg <- read_csv(
+  "/Users/diananichvoloda/Library/CloudStorage/GoogleDrive-diananichvoloda@college.harvard.edu/My Drive/2025-2026/Econ 1425/PAPER/DATA/Text Data/Baden-Württemberg.csv",
+  locale = locale(encoding = "UTF-8"),
+  show_col_types = FALSE
+)
+
+
+BadenWurttemberg <- BadenWurttemberg %>%
+  mutate(
+    # Step 1: remove "unknown"
+    Date = ifelse(Date == "unknown", NA, Date),
+
+    # Step 2: keep only the date part
+    Date = substr(Date, 1, 10),
+
+    # Step 3: convert to Date
+    Date = as.Date(Date)
+  )
+
+summary(BadenWurttemberg$Date)
+range(BadenWurttemberg$Date, na.rm = TRUE)
+
+bw <- BadenWurttemberg %>%
+  filter(!is.na(Date)) %>%
+  filter(Date >= as.Date("2013-01-01"),
+         Date <= as.Date("2025-12-31"))
+
+summary(bw$Date)
+range(bw$Date, na.rm = TRUE)
+
+bw_clean <- bw %>%
+  filter(Interjection == FALSE)
+nrow(bw)
+nrow(bw_clean)
+```
+
+```{r}
+library(dplyr)
+library(stringr)
+library(readr)
+
+speeches <- bw %>%
+  filter(Interjection == FALSE) %>%
+  arrange(Date, Period, Session) %>%
+  mutate(
+    new_speech = case_when(
+      row_number() == 1 ~ TRUE,
+      Period != lag(Period) ~ TRUE,
+      Session != lag(Session) ~ TRUE,
+      Date != lag(Date) ~ TRUE,
+      MPID != lag(MPID) ~ TRUE,
+      Chair != lag(Chair) ~ TRUE,
+      TRUE ~ FALSE
+    ),
+    speech_id = cumsum(new_speech)
+  ) %>%
+  group_by(speech_id) %>%
+  summarise(
+    Period = first(Period),
+    Session = first(Session),
+    Date = first(Date),
+    MPID = first(MPID),
+    Party = first(Party),
+    Constituency = first(Constituency),
+    Chair = first(Chair),
+    Speech = str_squish(str_c(Speech, collapse = " ")),
+    n_rows_merged = n(),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    n_words = str_count(Speech, "\\S+")
+  ) %>%
+  filter(n_words >= 5)
+
+write_csv(speeches, "bw_speeches_2013_2023_clean.csv")
+
+speeches <- speeches %>%
+  mutate(
+    constituency_name = str_remove(Constituency, "^\\d+\\s*"),
+    constituency_name = str_squish(constituency_name)
+  )
+speeches %>%
+  count(constituency_name, sort = TRUE)
+```
+
+```{r}
+library(dplyr)
+library(stringr)
+library(tibble)
+
+# 1) Standardize constituency names a bit more
+speeches <- speeches %>%
+  mutate(
+    constituency_name = str_squish(constituency_name),
+    constituency_name = str_replace_all(constituency_name, "–", "-")
+  )
+
+# 2) Collapse obvious sub-constituencies to city/county-level names
+speeches <- speeches %>%
+  mutate(
+    constituency_name_std = case_when(
+      str_detect(constituency_name, "^Stuttgart") ~ "Stuttgart",
+      str_detect(constituency_name, "^Mannheim") ~ "Mannheim",
+      str_detect(constituency_name, "^Karlsruhe") ~ "Karlsruhe",
+      str_detect(constituency_name, "^Freiburg") ~ "Freiburg",
+      str_detect(constituency_name, "^Hechingen-Munsingen$|^Hechingen-Münsingen$") ~ "Zollernalbkreis",
+      str_detect(constituency_name, "^Tuttlingen-Donaueschingen$|^Tuttlingen-Donau") ~ "Tuttlingen",
+      str_detect(constituency_name, "^Kirchheim unter Teck$") ~ "Esslingen",
+      TRUE ~ constituency_name
+    )
+  )
+
+# 3) Crosswalk: constituency -> Kreis / Stadtkreis + AGS
+# match_quality:
+#   exact = same-name or very close county/city match
+#   approx = constituency name assigned to containing Kreis/Stadtkreis
+constituency_to_kreis <- tribble(
+  ~constituency_name_std, ~kreis_name,                ~ags,    ~match_quality,
+  "Stuttgart",            "Stuttgart",                "08111", "approx",
+  "Leonberg",             "Böblingen",                "08115", "approx",
+  "Backnang",             "Rems-Murr-Kreis",          "08119", "approx",
+  "Esslingen",            "Esslingen",                "08116", "exact",
+  "Schwetzingen",         "Rhein-Neckar-Kreis",       "08226", "approx",
+  "Main-Tauber",          "Main-Tauber-Kreis",        "08128", "exact",
+  "Tuttlingen",           "Tuttlingen",               "08327", "approx",
+  "Balingen",             "Zollernalbkreis",          "08417", "approx",
+  "Neckarsulm",           "Heilbronn",                "08125", "approx",
+  "Bruchsal",             "Karlsruhe",                "08215", "approx",
+  "Göppingen",            "Göppingen",                "08117", "exact",
+  "Lahr",                 "Ortenaukreis",             "08317", "approx",
+  "Rottweil",             "Rottweil",                 "08325", "exact",
+  "Schwabisch Hall",      "Schwäbisch Hall",          "08127", "approx",
+  "Schwäbisch Hall",      "Schwäbisch Hall",          "08127", "exact",
+  "Heidenheim",           "Heidenheim",               "08135", "exact",
+  "Mannheim",             "Mannheim",                 "08222", "approx",
+  "Waiblingen",           "Rems-Murr-Kreis",          "08119", "approx",
+  "Zollernalbkreis",      "Zollernalbkreis",          "08417", "approx",
+  "Heilbronn",            "Heilbronn",                "08125", "exact",
+  "Schorndorf",           "Rems-Murr-Kreis",          "08119", "approx",
+  "Pforzheim",            "Pforzheim",                "08231", "exact",
+  "Freudenstadt",         "Freudenstadt",             "08237", "exact",
+  "Weinheim",             "Rhein-Neckar-Kreis",       "08226", "approx",
+  "Geislingen",           "Göppingen",                "08117", "approx",
+  "Enz",                  "Enzkreis",                 "08236", "exact",
+  "Böblingen",            "Böblingen",                "08115", "exact",
+  "Nürtingen",            "Esslingen",                "08116", "approx",
+  "Singen",               "Konstanz",                 "08335", "approx",
+  "Ravensburg",           "Ravensburg",               "08436", "exact",
+  "Kirchheim",            "Esslingen",                "08116", "approx",
+  "Ludwigsburg",          "Ludwigsburg",              "08118", "exact",
+  "Bretten",              "Karlsruhe",                "08215", "approx",
+  "Eppingen",             "Heilbronn",                "08125", "approx",
+  "Neckar-Odenwald",      "Neckar-Odenwald-Kreis",    "08225", "exact",
+  "Lörrach",              "Lörrach",                  "08336", "exact",
+  "Calw",                 "Calw",                     "08235", "exact",
+  "Hohenlohe",            "Hohenlohekreis",           "08126", "approx",
+  "Breisgau",             "Breisgau-Hochschwarzwald", "08315", "approx",
+  "Reutlingen",           "Reutlingen",               "08415", "exact",
+  "Sigmaringen",          "Sigmaringen",              "08437", "exact",
+  "Sinsheim",             "Rhein-Neckar-Kreis",       "08226", "approx",
+  "Wiesloch",             "Rhein-Neckar-Kreis",       "08226", "approx",
+  "Ulm",                  "Ulm",                      "08421", "exact",
+  "Wangen",               "Ravensburg",               "08436", "approx",
+  "Heidelberg",           "Heidelberg",               "08221", "exact",
+  "Rastatt",              "Rastatt",                  "08216", "exact",
+  "Tübingen",             "Tübingen",                 "08416", "exact",
+  "Offenburg",            "Ortenaukreis",             "08317", "approx",
+  "Aalen",                "Ostalbkreis",              "08136", "approx",
+  "Baden-Baden",          "Baden-Baden",              "08211", "exact",
+  "Schwäbisch Gmünd",     "Ostalbkreis",              "08136", "approx",
+  "Bodensee",             "Bodenseekreis",            "08435", "approx"
+)
+
+# 4) Join crosswalk onto full speeches dataset
+speeches_mapped <- speeches %>%
+  left_join(constituency_to_kreis, by = "constituency_name_std")
+
+# 5) Diagnostics
+# How many speeches got mapped?
+speeches_mapped %>%
+  summarise(
+    total_speeches = n(),
+    mapped_speeches = sum(!is.na(ags)),
+    mapped_share = mean(!is.na(ags))
+  )
+
+# Which constituency labels are still unmatched?
+speeches_mapped %>%
+  filter(is.na(ags)) %>%
+  count(constituency_name, sort = TRUE)
+
+# Optional: keep only exact matches for a conservative baseline
+#speeches_exact <- speeches_mapped %>%
+  #filter(match_quality == "exact")
+
+# Optional: keep exact + approximate for broader coverage
+speeches_baseline <- speeches_mapped %>%
+  filter(!is.na(ags))
+```
+
+```{r}
+library(stringr)
+
+speeches_baseline <- speeches_baseline %>%
+  mutate(
+    mentions_refugees = str_detect(
+  str_to_lower(Speech),
+  "flücht|asyl|migration|zuwander|migrant|integration|einwander|abschieb"
+)
+  )
+
+mean(speeches_baseline$mentions_refugees)
+
+write_csv(
+  speeches_baseline,
+  "/Users/diananichvoloda/Library/CloudStorage/GoogleDrive-diananichvoloda@college.harvard.edu/My Drive/2025-2026/Econ 1425/PAPER/DATA/Text Data/speeches_baseline_for_gabriel.csv"
+)
+```
+
+# Baden-Wurttemberg
+
+```{r}
+file_bw <- "/Users/diananichvoloda/Library/CloudStorage/GoogleDrive-diananichvoloda@college.harvard.edu/My Drive/2025-2026/Econ 1425/PAPER/DATA/Text Data/Baden-Württemberg.csv"
+```
+
+```{r}
+library(readr)
+library(dplyr)
+library(stringr)
+library(tidyr)
+library(purrr)
+
+clean_state_immigration_subset <- function(file_path,
+                                           start_date = "2013-01-01",
+                                           end_date   = "2025-12-31") {
+  
+  state_name <- tools::file_path_sans_ext(basename(file_path))
+  
+  immigration_pattern <- paste(
+    c(
+      "flücht", "geflücht", "asyl", "migration", "migrant",
+      "zuwander", "einwander", "ausländer", "fremd",
+      "integration", "integrations", "abschieb", "abschiebe",
+      "duld", "aufenthalt", "aufnahme", "schutzsuch",
+      "visa", "visum", "grenze", "grenz", "illegal",
+      "irregul", "schleus", "staatsangehör", "einbürger",
+      "bürgerrecht", "ukrain", "syr", "afghan",
+      "subsidiär", "schutzstatus", "rückführ", "rueckfuehr",
+      "heimat", "obergrenz", "flucht", "vertrieben",
+      "resettlement", "familiennachzug"
+    ),
+    collapse = "|"
+  )
+  
+  df <- read_csv(
+    file_path,
+    locale = locale(encoding = "UTF-8"),
+    show_col_types = FALSE
+  ) %>%
+    rename_with(trimws)
+  
+  # Ensure required columns exist even if missing in some states
+  required_cols <- c(
+    "Period", "Session", "Date", "Chair", "Interjection",
+    "MPID", "Party", "Constituency", "Speech"
+  )
+  
+  for (col in required_cols) {
+    if (!col %in% names(df)) {
+      df[[col]] <- NA
+    }
+  }
+  
+  df <- df %>%
+    select(all_of(required_cols)) %>%
+    mutate(
+      Period = suppressWarnings(as.integer(Period)),
+      Session = suppressWarnings(as.integer(Session)),
+      MPID = suppressWarnings(as.integer(MPID)),
+      
+      Chair = case_when(
+        Chair %in% c(TRUE, "TRUE", "true", 1, "1") ~ TRUE,
+        Chair %in% c(FALSE, "FALSE", "false", 0, "0") ~ FALSE,
+        TRUE ~ NA
+      ),
+      
+      Interjection = case_when(
+        Interjection %in% c(TRUE, "TRUE", "true", 1, "1") ~ TRUE,
+        Interjection %in% c(FALSE, "FALSE", "false", 0, "0") ~ FALSE,
+        TRUE ~ NA
+      ),
+      
+      Date = as.character(Date),
+      Date = str_trim(Date),
+      Date = case_when(
+        Date %in% c("unknown", "NA", "", "null") ~ NA_character_,
+        TRUE ~ Date
+      ),
+      Date = substr(Date, 1, 10),
+      Date = suppressWarnings(as.Date(Date)),
+      
+      Speech = str_squish(as.character(Speech)),
+      Party = as.character(Party),
+      Constituency = as.character(Constituency)
+    ) %>%
+    filter(!is.na(Speech), Speech != "") %>%
+    filter(!is.na(Date)) %>%
+    filter(Date >= as.Date(start_date),
+           Date <= as.Date(end_date))
+  
+  # Remove interjections when column exists / is usable
+  df_clean <- df %>%
+    filter(is.na(Interjection) | Interjection == FALSE)
+  
+  # Reconstruct speeches
+  df_clean <- df_clean %>%
+    mutate(
+      new_speech = case_when(
+        row_number() == 1 ~ TRUE,
+        Period != lag(Period) ~ TRUE,
+        Session != lag(Session) ~ TRUE,
+        Date != lag(Date) ~ TRUE,
+        MPID != lag(MPID) ~ TRUE,
+        Chair != lag(Chair) ~ TRUE,
+        TRUE ~ FALSE
+      ),
+      speech_group = cumsum(new_speech)
+    )
+  
+  speeches <- df_clean %>%
+    group_by(speech_group) %>%
+    summarise(
+      Period = first(Period),
+      Session = first(Session),
+      Date = first(Date),
+      MPID = first(MPID),
+      Party = first(Party),
+      Constituency = first(Constituency),
+      Chair = first(Chair),
+      Speech = str_squish(str_c(Speech, collapse = " ")),
+      n_rows_merged = n(),
+      .groups = "drop"
+    ) %>%
+    mutate(
+      n_words = str_count(Speech, "\\S+"),
+      state = state_name,
+      immigration_related = str_detect(
+        str_to_lower(Speech),
+        immigration_pattern
+      )
+    ) %>%
+    filter(n_words >= 5) %>%
+    filter(immigration_related) %>%
+    select(
+      state, Period, Session, Date, MPID, Party,
+      Constituency, Chair, Speech, n_rows_merged, n_words,
+      immigration_related
+    )
+  
+  return(speeches)
+}
+```
+
+```{r}
+library(readr)
+library(dplyr)
+library(stringr)
+library(lubridate)
+
+clean_bw_random_ags_subset <- function(file_path,
+                                       start_date = "2013-01-01",
+                                       end_date   = "2025-12-31",
+                                       sample_n   = 500,
+                                       seed       = 123) {
+  
+  normalize_text <- function(x) {
+    x <- as.character(x)
+    x <- str_trim(x)
+    x <- str_squish(x)
+    
+    # normalize dash variants
+    x <- str_replace_all(x, "[\u2010\u2011\u2012\u2013\u2014\u2212]", "-")
+    
+    # remove leading constituency numbers like "01 Stuttgart I"
+    x <- str_replace(x, "^\\d+\\s+", "")
+    
+    x
+  }
+  
+  parse_mixed_date <- function(x) {
+    x <- as.character(x)
+    x <- str_trim(x)
+    x[x %in% c("unknown", "NA", "", "null")] <- NA_character_
+    
+    x10 <- substr(x, 1, 10)
+    
+    out <- suppressWarnings(ymd(x10))
+    out <- coalesce(out, suppressWarnings(dmy(x10)))
+    out <- coalesce(out, suppressWarnings(mdy(x10)))
+    
+    out <- coalesce(out, suppressWarnings(ymd(x)))
+    out <- coalesce(out, suppressWarnings(dmy(x)))
+    out <- coalesce(out, suppressWarnings(mdy(x)))
+    
+    out
+  }
+  
+  constituency_to_district_bw <- function(constituency) {
+    constituency_key <- normalize_text(constituency)
+    
+    case_when(
+      str_detect(constituency_key, "^Stuttgart") ~ "Stuttgart",
+      constituency_key == "Böblingen" ~ "Böblingen",
+      constituency_key == "Leonberg" ~ "Böblingen",
+      constituency_key == "Esslingen" ~ "Esslingen",
+      constituency_key %in% c("Kirchheim", "Kirchheim unter Teck", "Nürtingen") ~ "Esslingen",
+      constituency_key == "Göppingen" ~ "Göppingen",
+      constituency_key == "Geislingen" ~ "Göppingen",
+      constituency_key == "Ludwigsburg" ~ "Ludwigsburg",
+      constituency_key %in% c("Vaihingen", "Bietigheim-Bissingen") ~ "Ludwigsburg",
+      constituency_key %in% c("Waiblingen", "Schorndorf", "Backnang") ~ "Rems-Murr-Kreis",
+      constituency_key == "Heilbronn" ~ "Heilbronn",
+      constituency_key %in% c("Eppingen", "Neckarsulm") ~ "Landkreis Heilbronn",
+      constituency_key == "Hohenlohe" ~ "Hohenlohekreis",
+      constituency_key == "Schwäbisch Hall" ~ "Schwäbisch Hall",
+      constituency_key == "Main-Tauber" ~ "Main-Tauber-Kreis",
+      constituency_key == "Heidenheim" ~ "Heidenheim",
+      constituency_key %in% c("Schwäbisch Gmünd", "Aalen") ~ "Ostalbkreis",
+      constituency_key == "Karlsruhe I" ~ "Karlsruhe",
+      constituency_key %in% c("Bruchsal", "Ettlingen") ~ "Landkreis Karlsruhe",
+      constituency_key == "Baden-Baden" ~ "Baden-Baden",
+      constituency_key == "Heidelberg" ~ "Heidelberg",
+      constituency_key %in% c("Mannheim I", "Mannheim II") ~ "Mannheim",
+      constituency_key %in% c("Wiesloch", "Weinheim", "Schwetzingen", "Sinsheim") ~ "Rhein-Neckar-Kreis",
+      constituency_key == "Neckar-Odenwald" ~ "Neckar-Odenwald-Kreis",
+      constituency_key == "Calw" ~ "Calw",
+      constituency_key == "Enz" ~ "Enzkreis",
+      constituency_key == "Freudenstadt" ~ "Freudenstadt",
+      str_detect(constituency_key, "^Freiburg") ~ "Freiburg im Breisgau",
+      constituency_key == "Breisgau" ~ "Breisgau-Hochschwarzwald",
+      constituency_key == "Emmendingen" ~ "Emmendingen",
+      constituency_key == "Lahr" ~ "Ortenaukreis",
+      constituency_key == "Rottweil" ~ "Rottweil",
+      constituency_key == "Villingen-Schwenningen" ~ "Schwarzwald-Baar-Kreis",
+      constituency_key %in% c("Konstanz", "Singen") ~ "Konstanz",
+      constituency_key == "Lörrach" ~ "Lörrach",
+      constituency_key == "Reutlingen" ~ "Reutlingen",
+      constituency_key == "Tübingen" ~ "Tübingen",
+      constituency_key == "Balingen" ~ "Zollernalbkreis",
+      constituency_key == "Ulm" ~ "Ulm",
+      constituency_key == "Ravensburg" ~ "Ravensburg",
+      constituency_key == "Sigmaringen" ~ "Sigmaringen",
+      TRUE ~ NA_character_
+    )
+  }
+  
+  district_to_ags_bw <- function(district) {
+    case_when(
+      district == "Stuttgart" ~ "08111",
+      district == "Böblingen" ~ "08115",
+      district == "Esslingen" ~ "08116",
+      district == "Göppingen" ~ "08117",
+      district == "Ludwigsburg" ~ "08118",
+      district == "Rems-Murr-Kreis" ~ "08119",
+      district == "Heilbronn" ~ "08121",
+      district == "Landkreis Heilbronn" ~ "08125",
+      district == "Hohenlohekreis" ~ "08126",
+      district == "Schwäbisch Hall" ~ "08127",
+      district == "Main-Tauber-Kreis" ~ "08128",
+      district == "Heidenheim" ~ "08135",
+      district == "Ostalbkreis" ~ "08136",
+      district == "Karlsruhe" ~ "08212",
+      district == "Landkreis Karlsruhe" ~ "08215",
+      district == "Baden-Baden" ~ "08211",
+      district == "Heidelberg" ~ "08221",
+      district == "Mannheim" ~ "08222",
+      district == "Rhein-Neckar-Kreis" ~ "08226",
+      district == "Neckar-Odenwald-Kreis" ~ "08225",
+      district == "Calw" ~ "08235",
+      district == "Enzkreis" ~ "08236",
+      district == "Freudenstadt" ~ "08237",
+      district == "Freiburg im Breisgau" ~ "08311",
+      district == "Breisgau-Hochschwarzwald" ~ "08315",
+      district == "Emmendingen" ~ "08316",
+      district == "Ortenaukreis" ~ "08317",
+      district == "Rottweil" ~ "08325",
+      district == "Schwarzwald-Baar-Kreis" ~ "08326",
+      district == "Konstanz" ~ "08335",
+      district == "Lörrach" ~ "08336",
+      district == "Reutlingen" ~ "08415",
+      district == "Tübingen" ~ "08416",
+      district == "Zollernalbkreis" ~ "08417",
+      district == "Ulm" ~ "08421",
+      district == "Ravensburg" ~ "08436",
+      district == "Sigmaringen" ~ "08437",
+      TRUE ~ NA_character_
+    )
+  }
+  
+  df <- read_csv(
+    file_path,
+    locale = locale(encoding = "UTF-8"),
+    show_col_types = FALSE
+  ) %>%
+    rename_with(trimws)
+  
+  required_cols <- c(
+    "Period", "Session", "Date", "Chair", "Interjection",
+    "MPID", "Party", "Constituency", "Speech"
+  )
+  
+  for (col in required_cols) {
+    if (!col %in% names(df)) {
+      df[[col]] <- NA
+    }
+  }
+  
+  df <- df %>%
+    select(all_of(required_cols)) %>%
+    mutate(
+      Period = suppressWarnings(as.integer(Period)),
+      Session = suppressWarnings(as.integer(Session)),
+      MPID = suppressWarnings(as.integer(MPID)),
+      
+      Chair = case_when(
+        Chair %in% c(TRUE, "TRUE", "true", 1, "1") ~ TRUE,
+        Chair %in% c(FALSE, "FALSE", "false", 0, "0") ~ FALSE,
+        TRUE ~ NA
+      ),
+      
+      Interjection = case_when(
+        Interjection %in% c(TRUE, "TRUE", "true", 1, "1") ~ TRUE,
+        Interjection %in% c(FALSE, "FALSE", "false", 0, "0") ~ FALSE,
+        TRUE ~ NA
+      ),
+      
+      Date = parse_mixed_date(Date),
+      Speech = str_squish(as.character(Speech)),
+      Party = as.character(Party),
+      Constituency = as.character(Constituency)
+    ) %>%
+    filter(!is.na(Speech), Speech != "") %>%
+    filter(!is.na(Date)) %>%
+    filter(Date >= as.Date(start_date),
+           Date <= as.Date(end_date))
+  
+  df_clean <- df %>%
+    filter(is.na(Interjection) | Interjection == FALSE)
+  
+  df_clean <- df_clean %>%
+    mutate(
+      new_speech = case_when(
+        row_number() == 1 ~ TRUE,
+        Period != lag(Period) ~ TRUE,
+        Session != lag(Session) ~ TRUE,
+        Date != lag(Date) ~ TRUE,
+        MPID != lag(MPID) ~ TRUE,
+        Chair != lag(Chair) ~ TRUE,
+        TRUE ~ FALSE
+      ),
+      speech_group = cumsum(new_speech)
+    )
+  
+  speeches <- df_clean %>%
+    group_by(speech_group) %>%
+    summarise(
+      Period = first(Period),
+      Session = first(Session),
+      Date = first(Date),
+      MPID = first(MPID),
+      Party = first(Party),
+      Constituency = first(Constituency),
+      Chair = first(Chair),
+      Speech = str_squish(str_c(Speech, collapse = " ")),
+      n_rows_merged = n(),
+      .groups = "drop"
+    ) %>%
+    mutate(
+      state = "Baden-Württemberg",
+      constituency_key = normalize_text(Constituency),
+      district = constituency_to_district_bw(constituency_key),
+      ags = district_to_ags_bw(district),
+      n_words = str_count(Speech, "\\S+")
+    ) %>%
+    filter(n_words >= 5) %>%
+    filter(!is.na(district), !is.na(ags)) %>%
+    select(
+      state, ags, district, Period, Session, Date, MPID, Party,
+      Constituency, constituency_key, Chair, Speech, n_rows_merged, n_words
+    )
+  
+  set.seed(seed)
+  
+  n_to_sample <- min(sample_n, nrow(speeches))
+  
+  if (n_to_sample == 0) {
+    warning("No speeches matched the Baden-Württemberg AGS mapping and date filters.")
+    return(speeches)
+  }
+  
+  sampled_speeches <- speeches %>%
+    slice_sample(n = n_to_sample)
+  
+  return(sampled_speeches)
+}
+bw_sample <- clean_bw_random_ags_subset(
+  file_path = "/Users/diananichvoloda/Library/CloudStorage/GoogleDrive-diananichvoloda@college.harvard.edu/My Drive/2025-2026/Econ 1425/PAPER/DATA/Text Data/Baden-Württemberg.csv",
+  start_date = "2013-01-01",
+  end_date   = "2025-12-31",
+  sample_n   = 300,
+  seed       = 42
+)
+
+write_csv(
+  bw_sample,
+  "/Users/diananichvoloda/Library/CloudStorage/GoogleDrive-diananichvoloda@college.harvard.edu/My Drive/2025-2026/Econ 1425/PAPER/DATA/Text Data/Samples/BW_sample.csv"
+)
+```
+
+```{r}
+library(readr)
+library(dplyr)
+library(stringr)
+library(lubridate)
+
+bw_raw <- read_csv(
+  "/Users/diananichvoloda/Library/CloudStorage/GoogleDrive-diananichvoloda@college.harvard.edu/My Drive/2025-2026/Econ 1425/PAPER/DATA/Text Data/Baden-Württemberg.csv",
+  locale = locale(encoding = "UTF-8"),
+  show_col_types = FALSE
+)
+
+bw_raw %>%
+  count(Constituency, sort = TRUE) %>%
+  print(n = 200)
+
+
+
+```
+
+Write to csv
+
+```{r}
+bw_sample_200 <- bw_speeches %>%
+  filter(n_words > 30) %>%
+  slice_sample(n = 200)
+
+write_csv(
+  bw_sample_200,
+  "/Users/diananichvoloda/Library/CloudStorage/GoogleDrive-diananichvoloda@college.harvard.edu/My Drive/2025-2026/Econ 1425/PAPER/DATA/Text Data/BW_sample_200.csv"
+)
+```
+
+# Bayern
+
+```{r}
+library(readr)
+library(dplyr)
+library(stringr)
+library(lubridate)
+
+clean_by_random_ags_subset <- function(file_path,
+                                       start_date = "2013-01-01",
+                                       end_date   = "2025-12-31",
+                                       sample_n   = 500,
+                                       seed       = 123) {
+  
+  normalize_text <- function(x) {
+    x <- as.character(x)
+    x <- str_trim(x)
+    x <- str_squish(x)
+    x <- str_replace_all(x, "[\u2010\u2011\u2012\u2013\u2014\u2212]", "-")
+    x <- str_replace(x, "^\\d+\\s+", "")
+    x
+  }
+  
+  parse_mixed_date <- function(x) {
+    x <- as.character(x)
+    x <- str_trim(x)
+    x[x %in% c("unknown", "NA", "", "null")] <- NA_character_
+    
+    x10 <- substr(x, 1, 10)
+    
+    out <- suppressWarnings(ymd(x10))
+    out <- coalesce(out, suppressWarnings(dmy(x10)))
+    out <- coalesce(out, suppressWarnings(mdy(x10)))
+    
+    out <- coalesce(out, suppressWarnings(ymd(x)))
+    out <- coalesce(out, suppressWarnings(dmy(x)))
+    out <- coalesce(out, suppressWarnings(mdy(x)))
+    
+    out
+  }
+  
+  constituency_to_district_by <- function(constituency) {
+    constituency_key <- normalize_text(constituency)
+    
+    case_when(
+      constituency_key == "Mittelfranken Erlangen-Stadt" ~ "Erlangen",
+      str_detect(constituency_key, "Nürnberg") ~ "Nürnberg",
+      constituency_key == "Niederbayern Deggendorf" ~ "Deggendorf",
+      constituency_key == "Niederbayern Dingolfing" ~ "Dingolfing-Landau",
+      constituency_key == "Niederbayern Landshut" ~ "Landshut",
+      constituency_key == "Oberbayern Eichstätt" ~ "Eichstätt",
+      constituency_key == "Oberbayern Fürstenfeldbruck-Ost" ~ "Fürstenfeldbruck",
+      constituency_key == "Oberbayern Mühldorf am Inn" ~ "Mühldorf a.Inn",
+      str_detect(constituency_key, "München-Giesing|München-Milbertshofen|München-Pasing|München-Ramersdorf|München-Schwabing") ~ "München",
+      constituency_key == "Oberbayern München-Land-Süd" ~ "München, Landkreis",
+      constituency_key == "Oberfranken Bamberg-Stadt" ~ "Bamberg",
+      constituency_key == "Oberfranken Bayreuth" ~ "Bayreuth",
+      constituency_key == "Oberfranken Coburg" ~ "Coburg",
+      constituency_key == "Oberfranken Forchheim" ~ "Forchheim",
+      constituency_key == "Oberfranken Hof" ~ "Hof",
+      constituency_key == "Oberpfalz Cham" ~ "Cham",
+      constituency_key == "Oberpfalz Neumarkt in der Oberpfalz" ~ "Neumarkt i.d.OPf.",
+      constituency_key == "Oberpfalz Regensburg-Stadt" ~ "Regensburg",
+      constituency_key == "Oberpfalz Tirschenreuth" ~ "Tirschenreuth",
+      constituency_key == "Oberpfalz Weiden in der Oberpfalz" ~ "Weiden i.d.OPf.",
+      constituency_key == "Schwaben Aichach-Friedberg" ~ "Aichach-Friedberg",
+      constituency_key == "Schwaben Neu-Ulm" ~ "Neu-Ulm",
+      constituency_key == "Schwaben, Memmingen" ~ "Memmingen",
+      constituency_key == "Unterfranken Aschaffenburg-Ost" ~ "Aschaffenburg",
+      constituency_key == "Unterfranken Schweinfurt" ~ "Schweinfurt",
+      constituency_key == "Unterfranken Würzburg-Land" ~ "Würzburg, Landkreis",
+      TRUE ~ NA_character_
+    )
+  }
+  
+  district_to_ags_by <- function(district) {
+    case_when(
+      district == "Erlangen" ~ "09562",
+      district == "Nürnberg" ~ "09564",
+      district == "Deggendorf" ~ "09271",
+      district == "Dingolfing-Landau" ~ "09279",
+      district == "Landshut" ~ "09261",
+      district == "Eichstätt" ~ "09176",
+      district == "Fürstenfeldbruck" ~ "09179",
+      district == "Mühldorf a.Inn" ~ "09183",
+      district == "München" ~ "09162",
+      district == "München, Landkreis" ~ "09184",
+      district == "Bamberg" ~ "09461",
+      district == "Bayreuth" ~ "09462",
+      district == "Coburg" ~ "09463",
+      district == "Forchheim" ~ "09474",
+      district == "Hof" ~ "09464",
+      district == "Cham" ~ "09372",
+      district == "Neumarkt i.d.OPf." ~ "09373",
+      district == "Regensburg" ~ "09362",
+      district == "Tirschenreuth" ~ "09377",
+      district == "Weiden i.d.OPf." ~ "09363",
+      district == "Aichach-Friedberg" ~ "09771",
+      district == "Neu-Ulm" ~ "09775",
+      district == "Memmingen" ~ "09764",
+      district == "Aschaffenburg" ~ "09661",
+      district == "Schweinfurt" ~ "09662",
+      district == "Würzburg, Landkreis" ~ "09679",
+      TRUE ~ NA_character_
+    )
+  }
+  
+  df <- read_csv(
+    file_path,
+    locale = locale(encoding = "UTF-8"),
+    show_col_types = FALSE
+  ) %>%
+    rename_with(trimws)
+  
+  required_cols <- c(
+    "Period", "Session", "Date", "Chair", "Interjection",
+    "MPID", "Party", "Constituency", "Speech"
+  )
+  
+  for (col in required_cols) {
+    if (!col %in% names(df)) {
+      df[[col]] <- NA
+    }
+  }
+  
+  df <- df %>%
+    select(all_of(required_cols)) %>%
+    mutate(
+      Period = suppressWarnings(as.integer(Period)),
+      Session = suppressWarnings(as.integer(Session)),
+      MPID = suppressWarnings(as.integer(MPID)),
+      
+      Chair = case_when(
+        Chair %in% c(TRUE, "TRUE", "true", 1, "1") ~ TRUE,
+        Chair %in% c(FALSE, "FALSE", "false", 0, "0") ~ FALSE,
+        TRUE ~ NA
+      ),
+      
+      Interjection = case_when(
+        Interjection %in% c(TRUE, "TRUE", "true", 1, "1") ~ TRUE,
+        Interjection %in% c(FALSE, "FALSE", "false", 0, "0") ~ FALSE,
+        TRUE ~ NA
+      ),
+      
+      Date = parse_mixed_date(Date),
+      Speech = str_squish(as.character(Speech)),
+      Party = as.character(Party),
+      Constituency = as.character(Constituency)
+    ) %>%
+    filter(!is.na(Speech), Speech != "") %>%
+    filter(!is.na(Date)) %>%
+    filter(Date >= as.Date(start_date),
+           Date <= as.Date(end_date))
+  
+  df_clean <- df %>%
+    filter(is.na(Interjection) | Interjection == FALSE)
+  
+  df_clean <- df_clean %>%
+    mutate(
+      new_speech = case_when(
+        row_number() == 1 ~ TRUE,
+        Period != lag(Period) ~ TRUE,
+        Session != lag(Session) ~ TRUE,
+        Date != lag(Date) ~ TRUE,
+        MPID != lag(MPID) ~ TRUE,
+        Chair != lag(Chair) ~ TRUE,
+        TRUE ~ FALSE
+      ),
+      speech_group = cumsum(new_speech)
+    )
+  
+  speeches <- df_clean %>%
+    group_by(speech_group) %>%
+    summarise(
+      Period = first(Period),
+      Session = first(Session),
+      Date = first(Date),
+      MPID = first(MPID),
+      Party = first(Party),
+      Constituency = first(Constituency),
+      Chair = first(Chair),
+      Speech = str_squish(str_c(Speech, collapse = " ")),
+      n_rows_merged = n(),
+      .groups = "drop"
+    ) %>%
+    mutate(
+      state = "Bayern",
+      constituency_key = normalize_text(Constituency),
+      district = constituency_to_district_by(constituency_key),
+      ags = district_to_ags_by(district),
+      n_words = str_count(Speech, "\\S+")
+    ) %>%
+    filter(n_words >= 5) %>%
+    filter(!is.na(district), !is.na(ags)) %>%
+    select(
+      state, ags, district, Period, Session, Date, MPID, Party,
+      Constituency, constituency_key, Chair, Speech, n_rows_merged, n_words
+    )
+  
+  set.seed(seed)
+  
+  n_to_sample <- min(sample_n, nrow(speeches))
+  
+  if (n_to_sample == 0) {
+    warning("No speeches matched the Bayern AGS mapping and date filters.")
+    return(speeches)
+  }
+  
+  sampled_speeches <- speeches %>%
+    slice_sample(n = n_to_sample)
+  
+  return(sampled_speeches)
+}
+
+by_sample <- clean_by_random_ags_subset(
+  file_path = "/Users/diananichvoloda/Library/CloudStorage/GoogleDrive-diananichvoloda@college.harvard.edu/My Drive/2025-2026/Econ 1425/PAPER/DATA/Text Data/Bayern.csv",
+  start_date = "2013-01-01",
+  end_date   = "2025-12-31",
+  sample_n   = 300,
+  seed       = 42
+)
+
+write_csv(
+  by_sample,
+  "/Users/diananichvoloda/Library/CloudStorage/GoogleDrive-diananichvoloda@college.harvard.edu/My Drive/2025-2026/Econ 1425/PAPER/DATA/Text Data/Samples/BY_sample.csv"
+)
+```
+
+```{r}
+by_sample_200 <- by_speeches %>%
+  filter(n_words > 30) %>%
+  slice_sample(n = 200)
+
+write_csv(
+  by_sample_200,
+  "/Users/diananichvoloda/Library/CloudStorage/GoogleDrive-diananichvoloda@college.harvard.edu/My Drive/2025-2026/Econ 1425/PAPER/DATA/Text Data/BY_sample_200.csv"
+)
+```
+
+# Berlin
+
+```{r}
+library(readr)
+library(dplyr)
+library(stringr)
+library(lubridate)
+
+clean_be_random_ags_subset <- function(file_path,
+                                       start_date = "2013-01-01",
+                                       end_date   = "2025-12-31",
+                                       sample_n   = 500,
+                                       seed       = 123) {
+  
+  normalize_text <- function(x) {
+    x <- as.character(x)
+    x <- str_trim(x)
+    x <- str_squish(x)
+    x <- str_replace_all(x, "[\u2010\u2011\u2012\u2013\u2014\u2212]", "-")
+    x <- str_replace(x, "^\\d+\\s+", "")
+    x
+  }
+  
+  parse_mixed_date <- function(x) {
+    x <- as.character(x)
+    x <- str_trim(x)
+    x[x %in% c("unknown", "NA", "", "null")] <- NA_character_
+    
+    x10 <- substr(x, 1, 10)
+    
+    out <- suppressWarnings(ymd(x10))
+    out <- coalesce(out, suppressWarnings(dmy(x10)))
+    out <- coalesce(out, suppressWarnings(mdy(x10)))
+    
+    out <- coalesce(out, suppressWarnings(ymd(x)))
+    out <- coalesce(out, suppressWarnings(dmy(x)))
+    out <- coalesce(out, suppressWarnings(mdy(x)))
+    
+    out
+  }
+  
+  constituency_to_district_be <- function(constituency) {
+    constituency_key <- normalize_text(constituency)
+    
+    case_when(
+      str_detect(constituency_key, "Berlin-Mitte|\\bMitte\\b|Wedding|Tiergarten|Moabit|Gesundbrunnen") ~ "Mitte",
+      str_detect(constituency_key, "Friedrichshain|Kreuzberg") ~ "Friedrichshain-Kreuzberg",
+      str_detect(constituency_key, "\\bPankow\\b|Prenzlauer Berg|Weissensee|Weißensee") ~ "Pankow",
+      str_detect(constituency_key, "Charlottenburg|Wilmersdorf") ~ "Charlottenburg-Wilmersdorf",
+      str_detect(constituency_key, "\\bSpandau\\b") ~ "Spandau",
+      str_detect(constituency_key, "Steglitz|Zehlendorf") ~ "Steglitz-Zehlendorf",
+      str_detect(constituency_key, "Tempelhof|Schoneberg|Schöneberg") ~ "Tempelhof-Schöneberg",
+      str_detect(constituency_key, "Neukolln|Neukölln") ~ "Neukölln",
+      str_detect(constituency_key, "Treptow|Kopenick|Köpenick") ~ "Treptow-Köpenick",
+      str_detect(constituency_key, "Marzahn|Hellersdorf") ~ "Marzahn-Hellersdorf",
+      str_detect(constituency_key, "\\bLichtenberg\\b|Hohenschonhausen|Hohenschönhausen") ~ "Lichtenberg",
+      str_detect(constituency_key, "Reinickendorf") ~ "Reinickendorf",
+      TRUE ~ NA_character_
+    )
+  }
+  
+  district_to_ags_be <- function(district) {
+    case_when(
+      !is.na(district) ~ "11000",
+      TRUE ~ NA_character_
+    )
+  }
+  
+  df <- read_csv(
+    file_path,
+    locale = locale(encoding = "UTF-8"),
+    show_col_types = FALSE
+  ) %>%
+    rename_with(trimws)
+  
+  required_cols <- c(
+    "Period", "Session", "Date", "Chair", "Interjection",
+    "MPID", "Party", "Constituency", "Speech"
+  )
+  
+  for (col in required_cols) {
+    if (!col %in% names(df)) {
+      df[[col]] <- NA
+    }
+  }
+  
+  df <- df %>%
+    select(all_of(required_cols)) %>%
+    mutate(
+      Period = suppressWarnings(as.integer(Period)),
+      Session = suppressWarnings(as.integer(Session)),
+      MPID = suppressWarnings(as.integer(MPID)),
+      
+      Chair = case_when(
+        Chair %in% c(TRUE, "TRUE", "true", 1, "1") ~ TRUE,
+        Chair %in% c(FALSE, "FALSE", "false", 0, "0") ~ FALSE,
+        TRUE ~ NA
+      ),
+      
+      Interjection = case_when(
+        Interjection %in% c(TRUE, "TRUE", "true", 1, "1") ~ TRUE,
+        Interjection %in% c(FALSE, "FALSE", "false", 0, "0") ~ FALSE,
+        TRUE ~ NA
+      ),
+      
+      Date = parse_mixed_date(Date),
+      Speech = str_squish(as.character(Speech)),
+      Party = as.character(Party),
+      Constituency = as.character(Constituency)
+    ) %>%
+    filter(!is.na(Speech), Speech != "") %>%
+    filter(!is.na(Date)) %>%
+    filter(Date >= as.Date(start_date),
+           Date <= as.Date(end_date))
+  
+  df_clean <- df %>%
+    filter(is.na(Interjection) | Interjection == FALSE)
+  
+  df_clean <- df_clean %>%
+    mutate(
+      new_speech = case_when(
+        row_number() == 1 ~ TRUE,
+        Period != lag(Period) ~ TRUE,
+        Session != lag(Session) ~ TRUE,
+        Date != lag(Date) ~ TRUE,
+        MPID != lag(MPID) ~ TRUE,
+        Chair != lag(Chair) ~ TRUE,
+        TRUE ~ FALSE
+      ),
+      speech_group = cumsum(new_speech)
+    )
+  
+  speeches <- df_clean %>%
+    group_by(speech_group) %>%
+    summarise(
+      Period = first(Period),
+      Session = first(Session),
+      Date = first(Date),
+      MPID = first(MPID),
+      Party = first(Party),
+      Constituency = first(Constituency),
+      Chair = first(Chair),
+      Speech = str_squish(str_c(Speech, collapse = " ")),
+      n_rows_merged = n(),
+      .groups = "drop"
+    ) %>%
+    mutate(
+      state = "Berlin",
+      constituency_key = normalize_text(Constituency),
+      district = constituency_to_district_be(constituency_key),
+      ags = district_to_ags_be(district),
+      n_words = str_count(Speech, "\\S+")
+    ) %>%
+    filter(n_words >= 5) %>%
+    filter(!is.na(district), !is.na(ags)) %>%
+    select(
+      state, ags, district, Period, Session, Date, MPID, Party,
+      Constituency, constituency_key, Chair, Speech, n_rows_merged, n_words
+    )
+  
+  set.seed(seed)
+  
+  n_to_sample <- min(sample_n, nrow(speeches))
+  
+  if (n_to_sample == 0) {
+    warning("No speeches matched the Berlin AGS mapping and date filters.")
+    return(speeches)
+  }
+  
+  sampled_speeches <- speeches %>%
+    slice_sample(n = n_to_sample)
+  
+  return(sampled_speeches)
+}
+
+be_sample <- clean_be_random_ags_subset(
+  file_path = "/Users/diananichvoloda/Library/CloudStorage/GoogleDrive-diananichvoloda@college.harvard.edu/My Drive/2025-2026/Econ 1425/PAPER/DATA/Text Data/Berlin.csv",
+  start_date = "2013-01-01",
+  end_date   = "2025-12-31",
+  sample_n   = 300,
+  seed       = 42
+)
+
+write_csv(
+  be_sample,
+  "/Users/diananichvoloda/Library/CloudStorage/GoogleDrive-diananichvoloda@college.harvard.edu/My Drive/2025-2026/Econ 1425/PAPER/DATA/Text Data/Samples/BE_sample.csv"
+)
+```
+
+```{r}
+bl_sample_200 <- bl_speeches %>%
+  filter(n_words > 30) %>%
+  slice_sample(n = 200)
+
+write_csv(
+  bl_sample_200,
+  "/Users/diananichvoloda/Library/CloudStorage/GoogleDrive-diananichvoloda@college.harvard.edu/My Drive/2025-2026/Econ 1425/PAPER/DATA/Text Data/BL_sample_200.csv"
+)
+```
+
+# Brandenburg
+
+```{r}
+library(readr)
+library(dplyr)
+library(stringr)
+library(lubridate)
+
+clean_bb_random_ags_subset <- function(file_path,
+                                       start_date = "2013-01-01",
+                                       end_date   = "2025-12-31",
+                                       sample_n   = 500,
+                                       seed       = 123) {
+  
+  normalize_text <- function(x) {
+    x <- as.character(x)
+    x <- str_trim(x)
+    x <- str_squish(x)
+    x <- str_replace_all(x, "[\u2010\u2011\u2012\u2013\u2014\u2212]", "-")
+    x <- str_replace(x, "^\\d+\\s+", "")
+    x
+  }
+  
+  parse_mixed_date <- function(x) {
+    x <- as.character(x)
+    x <- str_trim(x)
+    x[x %in% c("unknown", "NA", "", "null")] <- NA_character_
+    
+    x10 <- substr(x, 1, 10)
+    
+    out <- suppressWarnings(ymd(x10))
+    out <- coalesce(out, suppressWarnings(dmy(x10)))
+    out <- coalesce(out, suppressWarnings(mdy(x10)))
+    
+    out <- coalesce(out, suppressWarnings(ymd(x)))
+    out <- coalesce(out, suppressWarnings(dmy(x)))
+    out <- coalesce(out, suppressWarnings(mdy(x)))
+    
+    out
+  }
+  
+  constituency_to_district_bb <- function(constituency) {
+    constituency_key <- normalize_text(constituency)
+    
+    case_when(
+      str_detect(constituency_key, "^Barnim") ~ "Barnim",
+      constituency_key == "Brandenburg an der Havel II" ~ "Brandenburg an der Havel",
+      str_detect(constituency_key, "^Cottbus") ~ "Cottbus",
+      str_detect(constituency_key, "^Dahme-Spreewald") ~ "Dahme-Spreewald",
+      str_detect(constituency_key, "^Elbe-Elster") ~ "Elbe-Elster",
+      constituency_key == "Frankfurt (Oder)" ~ "Frankfurt (Oder)",
+      str_detect(constituency_key, "^Havelland") ~ "Havelland",
+      str_detect(constituency_key, "^Märkisch-Oderland") ~ "Märkisch-Oderland",
+      str_detect(constituency_key, "^Oberhavel") ~ "Oberhavel",
+      constituency_key == "Oberspreewald-Lausitz I" ~ "Oberspreewald-Lausitz",
+      str_detect(constituency_key, "^Oder-Spree") ~ "Oder-Spree",
+      constituency_key == "Ostprignitz-Ruppin I" ~ "Ostprignitz-Ruppin",
+      str_detect(constituency_key, "^Potsdam I|^Potsdam II") ~ "Potsdam",
+      str_detect(constituency_key, "^Potsdam-Mittelmark") ~ "Potsdam-Mittelmark",
+      str_detect(constituency_key, "^Teltow-Fläming") ~ "Teltow-Fläming",
+      str_detect(constituency_key, "^Uckermark") ~ "Uckermark",
+      TRUE ~ NA_character_
+    )
+  }
+  
+  district_to_ags_bb <- function(district) {
+    case_when(
+      district == "Barnim" ~ "12060",
+      district == "Brandenburg an der Havel" ~ "12051",
+      district == "Cottbus" ~ "12052",
+      district == "Dahme-Spreewald" ~ "12061",
+      district == "Elbe-Elster" ~ "12062",
+      district == "Frankfurt (Oder)" ~ "12053",
+      district == "Havelland" ~ "12063",
+      district == "Märkisch-Oderland" ~ "12064",
+      district == "Oberhavel" ~ "12065",
+      district == "Oberspreewald-Lausitz" ~ "12066",
+      district == "Oder-Spree" ~ "12067",
+      district == "Ostprignitz-Ruppin" ~ "12068",
+      district == "Potsdam" ~ "12054",
+      district == "Potsdam-Mittelmark" ~ "12069",
+      district == "Teltow-Fläming" ~ "12072",
+      district == "Uckermark" ~ "12073",
+      TRUE ~ NA_character_
+    )
+  }
+  
+  df <- read_csv(
+    file_path,
+    locale = locale(encoding = "UTF-8"),
+    show_col_types = FALSE
+  ) %>%
+    rename_with(trimws)
+  
+  required_cols <- c(
+    "Period", "Session", "Date", "Chair", "Interjection",
+    "MPID", "Party", "Constituency", "Speech"
+  )
+  
+  for (col in required_cols) {
+    if (!col %in% names(df)) {
+      df[[col]] <- NA
+    }
+  }
+  
+  df <- df %>%
+    select(all_of(required_cols)) %>%
+    mutate(
+      Period = suppressWarnings(as.integer(Period)),
+      Session = suppressWarnings(as.integer(Session)),
+      MPID = suppressWarnings(as.integer(MPID)),
+      
+      Chair = case_when(
+        Chair %in% c(TRUE, "TRUE", "true", 1, "1") ~ TRUE,
+        Chair %in% c(FALSE, "FALSE", "false", 0, "0") ~ FALSE,
+        TRUE ~ NA
+      ),
+      
+      Interjection = case_when(
+        Interjection %in% c(TRUE, "TRUE", "true", 1, "1") ~ TRUE,
+        Interjection %in% c(FALSE, "FALSE", "false", 0, "0") ~ FALSE,
+        TRUE ~ NA
+      ),
+      
+      Date = parse_mixed_date(Date),
+      Speech = str_squish(as.character(Speech)),
+      Party = as.character(Party),
+      Constituency = as.character(Constituency)
+    ) %>%
+    filter(!is.na(Speech), Speech != "") %>%
+    filter(!is.na(Date)) %>%
+    filter(Date >= as.Date(start_date),
+           Date <= as.Date(end_date))
+  
+  df_clean <- df %>%
+    filter(is.na(Interjection) | Interjection == FALSE)
+  
+  df_clean <- df_clean %>%
+    mutate(
+      new_speech = case_when(
+        row_number() == 1 ~ TRUE,
+        Period != lag(Period) ~ TRUE,
+        Session != lag(Session) ~ TRUE,
+        Date != lag(Date) ~ TRUE,
+        MPID != lag(MPID) ~ TRUE,
+        Chair != lag(Chair) ~ TRUE,
+        TRUE ~ FALSE
+      ),
+      speech_group = cumsum(new_speech)
+    )
+  
+  speeches <- df_clean %>%
+    group_by(speech_group) %>%
+    summarise(
+      Period = first(Period),
+      Session = first(Session),
+      Date = first(Date),
+      MPID = first(MPID),
+      Party = first(Party),
+      Constituency = first(Constituency),
+      Chair = first(Chair),
+      Speech = str_squish(str_c(Speech, collapse = " ")),
+      n_rows_merged = n(),
+      .groups = "drop"
+    ) %>%
+    mutate(
+      state = "Brandenburg",
+      constituency_key = normalize_text(Constituency),
+      district = constituency_to_district_bb(constituency_key),
+      ags = district_to_ags_bb(district),
+      n_words = str_count(Speech, "\\S+")
+    ) %>%
+    filter(n_words >= 5) %>%
+    filter(!is.na(district), !is.na(ags)) %>%
+    select(
+      state, ags, district, Period, Session, Date, MPID, Party,
+      Constituency, constituency_key, Chair, Speech, n_rows_merged, n_words
+    )
+  
+  set.seed(seed)
+  
+  n_to_sample <- min(sample_n, nrow(speeches))
+  
+  if (n_to_sample == 0) {
+    warning("No speeches matched the Brandenburg AGS mapping and date filters.")
+    return(speeches)
+  }
+  
+  sampled_speeches <- speeches %>%
+    slice_sample(n = n_to_sample)
+  
+  return(sampled_speeches)
+}
+
+bb_sample <- clean_bb_random_ags_subset(
+  file_path = "/Users/diananichvoloda/Library/CloudStorage/GoogleDrive-diananichvoloda@college.harvard.edu/My Drive/2025-2026/Econ 1425/PAPER/DATA/Text Data/Brandenburg.csv",
+  start_date = "2013-01-01",
+  end_date   = "2025-12-31",
+  sample_n   = 300,
+  seed       = 42
+)
+
+write_csv(
+  bb_sample,
+  "/Users/diananichvoloda/Library/CloudStorage/GoogleDrive-diananichvoloda@college.harvard.edu/My Drive/2025-2026/Econ 1425/PAPER/DATA/Text Data/Samples/BB_sample.csv"
+)
+```
+
+```{r}
+br_sample_200 <- br_speeches %>%
+  filter(n_words > 30) %>%
+  slice_sample(n = 200)
+
+write_csv(
+  br_sample_200,
+  "/Users/diananichvoloda/Library/CloudStorage/GoogleDrive-diananichvoloda@college.harvard.edu/My Drive/2025-2026/Econ 1425/PAPER/DATA/Text Data/BR_sample_200.csv"
+)
+```
+
+# Bremen
+
+```{r}
+library(readr)
+library(dplyr)
+library(stringr)
+library(lubridate)
+
+clean_hb_random_ags_subset <- function(file_path,
+                                       start_date = "2013-01-01",
+                                       end_date   = "2025-12-31",
+                                       sample_n   = 500,
+                                       seed       = 123) {
+  
+  normalize_text <- function(x) {
+    x <- as.character(x)
+    x <- str_trim(x)
+    x <- str_squish(x)
+    x <- str_replace_all(x, "[\u2010\u2011\u2012\u2013\u2014\u2212]", "-")
+    x <- str_replace(x, "^\\d+\\s+", "")
+    x
+  }
+  
+  parse_mixed_date <- function(x) {
+    x <- as.character(x)
+    x <- str_trim(x)
+    x[x %in% c("unknown", "NA", "", "null")] <- NA_character_
+    
+    x10 <- substr(x, 1, 10)
+    
+    out <- suppressWarnings(ymd(x10))
+    out <- coalesce(out, suppressWarnings(dmy(x10)))
+    out <- coalesce(out, suppressWarnings(mdy(x10)))
+    
+    out <- coalesce(out, suppressWarnings(ymd(x)))
+    out <- coalesce(out, suppressWarnings(dmy(x)))
+    out <- coalesce(out, suppressWarnings(mdy(x)))
+    
+    out
+  }
+  
+  constituency_to_district_hb <- function(constituency) {
+    constituency_key <- normalize_text(constituency)
+    
+    case_when(
+      str_detect(constituency_key, "Bremerhaven") ~ "Bremerhaven",
+      str_detect(constituency_key, "^Bremen$|Bremen-") ~ "Bremen",
+      TRUE ~ NA_character_
+    )
+  }
+  
+  district_to_ags_hb <- function(district) {
+    case_when(
+      district == "Bremen" ~ "04011",
+      district == "Bremerhaven" ~ "04012",
+      TRUE ~ NA_character_
+    )
+  }
+  
+  df <- read_csv(
+    file_path,
+    locale = locale(encoding = "UTF-8"),
+    show_col_types = FALSE
+  ) %>%
+    rename_with(trimws)
+  
+  required_cols <- c(
+    "Period", "Session", "Date", "Chair", "Interjection",
+    "MPID", "Party", "Constituency", "Speech"
+  )
+  
+  for (col in required_cols) {
+    if (!col %in% names(df)) {
+      df[[col]] <- NA
+    }
+  }
+  
+  df <- df %>%
+    select(all_of(required_cols)) %>%
+    mutate(
+      Period = suppressWarnings(as.integer(Period)),
+      Session = suppressWarnings(as.integer(Session)),
+      MPID = suppressWarnings(as.integer(MPID)),
+      
+      Chair = case_when(
+        Chair %in% c(TRUE, "TRUE", "true", 1, "1") ~ TRUE,
+        Chair %in% c(FALSE, "FALSE", "false", 0, "0") ~ FALSE,
+        TRUE ~ NA
+      ),
+      
+      Interjection = case_when(
+        Interjection %in% c(TRUE, "TRUE", "true", 1, "1") ~ TRUE,
+        Interjection %in% c(FALSE, "FALSE", "false", 0, "0") ~ FALSE,
+        TRUE ~ NA
+      ),
+      
+      Date = parse_mixed_date(Date),
+      Speech = str_squish(as.character(Speech)),
+      Party = as.character(Party),
+      Constituency = as.character(Constituency)
+    ) %>%
+    filter(!is.na(Speech), Speech != "") %>%
+    filter(!is.na(Date)) %>%
+    filter(Date >= as.Date(start_date),
+           Date <= as.Date(end_date))
+  
+  df_clean <- df %>%
+    filter(is.na(Interjection) | Interjection == FALSE)
+  
+  df_clean <- df_clean %>%
+    mutate(
+      new_speech = case_when(
+        row_number() == 1 ~ TRUE,
+        Period != lag(Period) ~ TRUE,
+        Session != lag(Session) ~ TRUE,
+        Date != lag(Date) ~ TRUE,
+        MPID != lag(MPID) ~ TRUE,
+        Chair != lag(Chair) ~ TRUE,
+        TRUE ~ FALSE
+      ),
+      speech_group = cumsum(new_speech)
+    )
+  
+  speeches <- df_clean %>%
+    group_by(speech_group) %>%
+    summarise(
+      Period = first(Period),
+      Session = first(Session),
+      Date = first(Date),
+      MPID = first(MPID),
+      Party = first(Party),
+      Constituency = first(Constituency),
+      Chair = first(Chair),
+      Speech = str_squish(str_c(Speech, collapse = " ")),
+      n_rows_merged = n(),
+      .groups = "drop"
+    ) %>%
+    mutate(
+      state = "Bremen",
+      constituency_key = normalize_text(Constituency),
+      district = constituency_to_district_hb(constituency_key),
+      ags = district_to_ags_hb(district),
+      n_words = str_count(Speech, "\\S+")
+    ) %>%
+    filter(n_words >= 5) %>%
+    filter(!is.na(district), !is.na(ags)) %>%
+    select(
+      state, ags, district, Period, Session, Date, MPID, Party,
+      Constituency, constituency_key, Chair, Speech, n_rows_merged, n_words
+    )
+  
+  set.seed(seed)
+  
+  n_to_sample <- min(sample_n, nrow(speeches))
+  
+  if (n_to_sample == 0) {
+    warning("No speeches matched the Bremen AGS mapping and date filters.")
+    return(speeches)
+  }
+  
+  sampled_speeches <- speeches %>%
+    slice_sample(n = n_to_sample)
+  
+  return(sampled_speeches)
+}
+
+hb_sample <- clean_hb_random_ags_subset(
+  file_path = "/Users/diananichvoloda/Library/CloudStorage/GoogleDrive-diananichvoloda@college.harvard.edu/My Drive/2025-2026/Econ 1425/PAPER/DATA/Text Data/Bremen.csv",
+  start_date = "2013-01-01",
+  end_date   = "2025-12-31",
+  sample_n   = 300,
+  seed       = 42
+)
+
+write_csv(
+  hb_sample,
+  "/Users/diananichvoloda/Library/CloudStorage/GoogleDrive-diananichvoloda@college.harvard.edu/My Drive/2025-2026/Econ 1425/PAPER/DATA/Text Data/Samples/HB_sample.csv"
+)
+```
+
+# Hamburg
+
+```{r}
+library(readr)
+library(dplyr)
+library(stringr)
+library(lubridate)
+
+clean_hh_random_ags_subset <- function(file_path,
+                                       start_date = "2013-01-01",
+                                       end_date   = "2025-12-31",
+                                       sample_n   = 500,
+                                       seed       = 123) {
+  
+  normalize_text <- function(x) {
+    x <- as.character(x)
+    x <- str_trim(x)
+    x <- str_squish(x)
+    x <- str_replace_all(x, "[\u2010\u2011\u2012\u2013\u2014\u2212]", "-")
+    x <- str_replace(x, "^\\d+\\s+", "")
+    x
+  }
+  
+  parse_mixed_date <- function(x) {
+    x <- as.character(x)
+    x <- str_trim(x)
+    x[x %in% c("unknown", "NA", "", "null")] <- NA_character_
+    
+    x10 <- substr(x, 1, 10)
+    
+    out <- suppressWarnings(ymd(x10))
+    out <- coalesce(out, suppressWarnings(dmy(x10)))
+    out <- coalesce(out, suppressWarnings(mdy(x10)))
+    
+    out <- coalesce(out, suppressWarnings(ymd(x)))
+    out <- coalesce(out, suppressWarnings(dmy(x)))
+    out <- coalesce(out, suppressWarnings(mdy(x)))
+    
+    out
+  }
+  
+  constituency_to_district_hh <- function(constituency) {
+    constituency_key <- normalize_text(constituency)
+    
+    case_when(
+      # Hamburg-Mitte
+      str_detect(constituency_key, "Hamburg-Mitte|Billstedt|Wilhelmsburg|Finkenwerder") ~ "Hamburg-Mitte",
+      
+      # Altona
+      str_detect(constituency_key, "Altona|Blankenese|Altona-West") ~ "Altona",
+      
+      # Eimsbüttel
+      str_detect(constituency_key, "Eimsbuttel|Eimsbüttel|Lokstedt|Niendorf|Schnelsen|Stellingen|Rotherbaum|Harvestehude") ~ "Eimsbüttel",
+      
+      # Hamburg-Nord
+      str_detect(constituency_key, "Hamburg-Nord|Fuhlsbuttel|Fuhlsbüttel|Alsterdorf|Langenhorn|Barmbek|Uhlenhorst|Dulsberg|Winterhude") ~ "Hamburg-Nord",
+      
+      # Wandsbek
+      str_detect(constituency_key, "Wandsbek|Bramfeld|Farmsen|Berne|Alstertal|Walddorfer|Walddörfer|Rahlstedt") ~ "Wandsbek",
+      
+      # Bergedorf
+      str_detect(constituency_key, "Bergedorf") ~ "Bergedorf",
+      
+      # Harburg
+      str_detect(constituency_key, "Harburg|Suderelbe|Süderelbe") ~ "Harburg",
+      
+      TRUE ~ NA_character_
+    )
+  }
+  
+  district_to_ags_hh <- function(district) {
+    case_when(
+      !is.na(district) ~ "02000",
+      TRUE ~ NA_character_
+    )
+  }
+  
+  df <- read_csv(
+    file_path,
+    locale = locale(encoding = "UTF-8"),
+    show_col_types = FALSE
+  ) %>%
+    rename_with(trimws)
+  
+  required_cols <- c(
+    "Period", "Session", "Date", "Chair", "Interjection",
+    "MPID", "Party", "Constituency", "Speech"
+  )
+  
+  for (col in required_cols) {
+    if (!col %in% names(df)) {
+      df[[col]] <- NA
+    }
+  }
+  
+  df <- df %>%
+    select(all_of(required_cols)) %>%
+    mutate(
+      Period = suppressWarnings(as.integer(Period)),
+      Session = suppressWarnings(as.integer(Session)),
+      MPID = suppressWarnings(as.integer(MPID)),
+      
+      Chair = case_when(
+        Chair %in% c(TRUE, "TRUE", "true", 1, "1") ~ TRUE,
+        Chair %in% c(FALSE, "FALSE", "false", 0, "0") ~ FALSE,
+        TRUE ~ NA
+      ),
+      
+      Interjection = case_when(
+        Interjection %in% c(TRUE, "TRUE", "true", 1, "1") ~ TRUE,
+        Interjection %in% c(FALSE, "FALSE", "false", 0, "0") ~ FALSE,
+        TRUE ~ NA
+      ),
+      
+      Date = parse_mixed_date(Date),
+      Speech = str_squish(as.character(Speech)),
+      Party = as.character(Party),
+      Constituency = as.character(Constituency)
+    ) %>%
+    filter(!is.na(Speech), Speech != "") %>%
+    filter(!is.na(Date)) %>%
+    filter(Date >= as.Date(start_date),
+           Date <= as.Date(end_date))
+  
+  df_clean <- df %>%
+    filter(is.na(Interjection) | Interjection == FALSE)
+  
+  df_clean <- df_clean %>%
+    mutate(
+      new_speech = case_when(
+        row_number() == 1 ~ TRUE,
+        Period != lag(Period) ~ TRUE,
+        Session != lag(Session) ~ TRUE,
+        Date != lag(Date) ~ TRUE,
+        MPID != lag(MPID) ~ TRUE,
+        Chair != lag(Chair) ~ TRUE,
+        TRUE ~ FALSE
+      ),
+      speech_group = cumsum(new_speech)
+    )
+  
+  speeches <- df_clean %>%
+    group_by(speech_group) %>%
+    summarise(
+      Period = first(Period),
+      Session = first(Session),
+      Date = first(Date),
+      MPID = first(MPID),
+      Party = first(Party),
+      Constituency = first(Constituency),
+      Chair = first(Chair),
+      Speech = str_squish(str_c(Speech, collapse = " ")),
+      n_rows_merged = n(),
+      .groups = "drop"
+    ) %>%
+    mutate(
+      state = "Hamburg",
+      constituency_key = normalize_text(Constituency),
+      district = constituency_to_district_hh(constituency_key),
+      ags = district_to_ags_hh(district),
+      n_words = str_count(Speech, "\\S+")
+    ) %>%
+    filter(n_words >= 5) %>%
+    filter(!is.na(district), !is.na(ags)) %>%
+    select(
+      state, ags, district, Period, Session, Date, MPID, Party,
+      Constituency, constituency_key, Chair, Speech, n_rows_merged, n_words
+    )
+  
+  set.seed(seed)
+  
+  n_to_sample <- min(sample_n, nrow(speeches))
+  
+  if (n_to_sample == 0) {
+    warning("No speeches matched the Hamburg AGS mapping and date filters.")
+    return(speeches)
+  }
+  
+  sampled_speeches <- speeches %>%
+    slice_sample(n = n_to_sample)
+  
+  return(sampled_speeches)
+}
+
+hh_sample <- clean_hh_random_ags_subset(
+  file_path = "/Users/diananichvoloda/Library/CloudStorage/GoogleDrive-diananichvoloda@college.harvard.edu/My Drive/2025-2026/Econ 1425/PAPER/DATA/Text Data/Hamburg.csv",
+  start_date = "2013-01-01",
+  end_date   = "2025-12-31",
+  sample_n   = 300,
+  seed       = 42
+)
+
+write_csv(
+  hh_sample,
+  "/Users/diananichvoloda/Library/CloudStorage/GoogleDrive-diananichvoloda@college.harvard.edu/My Drive/2025-2026/Econ 1425/PAPER/DATA/Text Data/Samples/HH_sample.csv"
+)
+```
+
+# Hessen
+
+```{r}
+library(readr)
+library(dplyr)
+library(stringr)
+library(lubridate)
+
+clean_he_random_ags_subset <- function(file_path,
+                                       start_date = "2013-01-01",
+                                       end_date   = "2025-12-31",
+                                       sample_n   = 500,
+                                       seed       = 123) {
+  
+  normalize_text <- function(x) {
+    x <- as.character(x)
+    x <- str_trim(x)
+    x <- str_squish(x)
+    x <- str_replace_all(x, "[\u2010\u2011\u2012\u2013\u2014\u2212]", "-")
+    x <- str_replace(x, "^\\d+\\s+", "")
+    x
+  }
+  
+  parse_mixed_date <- function(x) {
+    x <- as.character(x)
+    x <- str_trim(x)
+    x[x %in% c("unknown", "NA", "", "null")] <- NA_character_
+    
+    x10 <- substr(x, 1, 10)
+    
+    out <- suppressWarnings(ymd(x10))
+    out <- coalesce(out, suppressWarnings(dmy(x10)))
+    out <- coalesce(out, suppressWarnings(mdy(x10)))
+    
+    out <- coalesce(out, suppressWarnings(ymd(x)))
+    out <- coalesce(out, suppressWarnings(dmy(x)))
+    out <- coalesce(out, suppressWarnings(mdy(x)))
+    
+    out
+  }
+  
+  constituency_to_district_he <- function(constituency) {
+    constituency_key <- normalize_text(constituency)
+    
+    case_when(
+      str_detect(constituency_key, "^Bergstraße") ~ "Bergstraße",
+      str_detect(constituency_key, "^Darmstadt-Dieburg") ~ "Darmstadt-Dieburg",
+      constituency_key == "Darmstadt-Stadt I" ~ "Darmstadt",
+      constituency_key == "Eschwege-Witzenhausen" ~ "Werra-Meißner-Kreis",
+      str_detect(constituency_key, "^Frankfurt am Main") ~ "Frankfurt am Main",
+      str_detect(constituency_key, "^Fulda") ~ "Fulda",
+      str_detect(constituency_key, "^Gießen") ~ "Gießen",
+      str_detect(constituency_key, "^Gross-Gerau|^Groß-Gerau") ~ "Groß-Gerau",
+      str_detect(constituency_key, "^Hochtaunus") ~ "Hochtaunuskreis",
+      str_detect(constituency_key, "^Kassel-Land") ~ "Kassel, Landkreis",
+      str_detect(constituency_key, "^Kassel-Stadt") ~ "Kassel",
+      str_detect(constituency_key, "^Lahn-Dill") ~ "Lahn-Dill-Kreis",
+      str_detect(constituency_key, "^Limburg-Weilburg") ~ "Limburg-Weilburg",
+      str_detect(constituency_key, "^Marburg-Biedenkopf") ~ "Marburg-Biedenkopf",
+      constituency_key == "Odenwald" ~ "Odenwaldkreis",
+      str_detect(constituency_key, "^Offenbach Land") ~ "Offenbach, Landkreis",
+      constituency_key == "Offenbach-Stadt" ~ "Offenbach am Main",
+      str_detect(constituency_key, "^Rheingau-Taunus") ~ "Rheingau-Taunus-Kreis",
+      constituency_key == "Rotenburg" ~ "Hersfeld-Rotenburg",
+      str_detect(constituency_key, "^Schwalm-Eder") ~ "Schwalm-Eder-Kreis",
+      str_detect(constituency_key, "^Waldeck-Frankenberg") ~ "Waldeck-Frankenberg",
+      str_detect(constituency_key, "^Wetterau") ~ "Wetteraukreis",
+      str_detect(constituency_key, "^Wiesbaden") ~ "Wiesbaden",
+      TRUE ~ NA_character_
+    )
+  }
+  
+  district_to_ags_he <- function(district) {
+    case_when(
+      district == "Bergstraße" ~ "06431",
+      district == "Darmstadt-Dieburg" ~ "06432",
+      district == "Darmstadt" ~ "06411",
+      district == "Werra-Meißner-Kreis" ~ "06636",
+      district == "Frankfurt am Main" ~ "06412",
+      district == "Fulda" ~ "06631",
+      district == "Gießen" ~ "06531",
+      district == "Groß-Gerau" ~ "06433",
+      district == "Hochtaunuskreis" ~ "06434",
+      district == "Kassel, Landkreis" ~ "06633",
+      district == "Kassel" ~ "06611",
+      district == "Lahn-Dill-Kreis" ~ "06532",
+      district == "Limburg-Weilburg" ~ "06533",
+      district == "Marburg-Biedenkopf" ~ "06534",
+      district == "Odenwaldkreis" ~ "06437",
+      district == "Offenbach, Landkreis" ~ "06438",
+      district == "Offenbach am Main" ~ "06413",
+      district == "Rheingau-Taunus-Kreis" ~ "06439",
+      district == "Hersfeld-Rotenburg" ~ "06632",
+      district == "Schwalm-Eder-Kreis" ~ "06634",
+      district == "Waldeck-Frankenberg" ~ "06635",
+      district == "Wetteraukreis" ~ "06440",
+      district == "Wiesbaden" ~ "06414",
+      TRUE ~ NA_character_
+    )
+  }
+  
+  df <- read_csv(
+    file_path,
+    locale = locale(encoding = "UTF-8"),
+    show_col_types = FALSE
+  ) %>%
+    rename_with(trimws)
+  
+  required_cols <- c(
+    "Period", "Session", "Date", "Chair", "Interjection",
+    "MPID", "Party", "Constituency", "Speech"
+  )
+  
+  for (col in required_cols) {
+    if (!col %in% names(df)) {
+      df[[col]] <- NA
+    }
+  }
+  
+  df <- df %>%
+    select(all_of(required_cols)) %>%
+    mutate(
+      Period = suppressWarnings(as.integer(Period)),
+      Session = suppressWarnings(as.integer(Session)),
+      MPID = suppressWarnings(as.integer(MPID)),
+      
+      Chair = case_when(
+        Chair %in% c(TRUE, "TRUE", "true", 1, "1") ~ TRUE,
+        Chair %in% c(FALSE, "FALSE", "false", 0, "0") ~ FALSE,
+        TRUE ~ NA
+      ),
+      
+      Interjection = case_when(
+        Interjection %in% c(TRUE, "TRUE", "true", 1, "1") ~ TRUE,
+        Interjection %in% c(FALSE, "FALSE", "false", 0, "0") ~ FALSE,
+        TRUE ~ NA
+      ),
+      
+      Date = parse_mixed_date(Date),
+      Speech = str_squish(as.character(Speech)),
+      Party = as.character(Party),
+      Constituency = as.character(Constituency)
+    ) %>%
+    filter(!is.na(Speech), Speech != "") %>%
+    filter(!is.na(Date)) %>%
+    filter(Date >= as.Date(start_date),
+           Date <= as.Date(end_date))
+  
+  df_clean <- df %>%
+    filter(is.na(Interjection) | Interjection == FALSE)
+  
+  df_clean <- df_clean %>%
+    mutate(
+      new_speech = case_when(
+        row_number() == 1 ~ TRUE,
+        Period != lag(Period) ~ TRUE,
+        Session != lag(Session) ~ TRUE,
+        Date != lag(Date) ~ TRUE,
+        MPID != lag(MPID) ~ TRUE,
+        Chair != lag(Chair) ~ TRUE,
+        TRUE ~ FALSE
+      ),
+      speech_group = cumsum(new_speech)
+    )
+  
+  speeches <- df_clean %>%
+    group_by(speech_group) %>%
+    summarise(
+      Period = first(Period),
+      Session = first(Session),
+      Date = first(Date),
+      MPID = first(MPID),
+      Party = first(Party),
+      Constituency = first(Constituency),
+      Chair = first(Chair),
+      Speech = str_squish(str_c(Speech, collapse = " ")),
+      n_rows_merged = n(),
+      .groups = "drop"
+    ) %>%
+    mutate(
+      state = "Hessen",
+      constituency_key = normalize_text(Constituency),
+      district = constituency_to_district_he(constituency_key),
+      ags = district_to_ags_he(district),
+      n_words = str_count(Speech, "\\S+")
+    ) %>%
+    filter(n_words >= 5) %>%
+    filter(!is.na(district), !is.na(ags)) %>%
+    select(
+      state, ags, district, Period, Session, Date, MPID, Party,
+      Constituency, constituency_key, Chair, Speech, n_rows_merged, n_words
+    )
+  
+  set.seed(seed)
+  
+  n_to_sample <- min(sample_n, nrow(speeches))
+  
+  if (n_to_sample == 0) {
+    warning("No speeches matched the Hessen AGS mapping and date filters.")
+    return(speeches)
+  }
+  
+  sampled_speeches <- speeches %>%
+    slice_sample(n = n_to_sample)
+  
+  return(sampled_speeches)
+}
+
+he_sample <- clean_he_random_ags_subset(
+  file_path = "/Users/diananichvoloda/Library/CloudStorage/GoogleDrive-diananichvoloda@college.harvard.edu/My Drive/2025-2026/Econ 1425/PAPER/DATA/Text Data/Hessen.csv",
+  start_date = "2013-01-01",
+  end_date   = "2025-12-31",
+  sample_n   = 300,
+  seed       = 42
+)
+
+write_csv(
+  he_sample,
+  "/Users/diananichvoloda/Library/CloudStorage/GoogleDrive-diananichvoloda@college.harvard.edu/My Drive/2025-2026/Econ 1425/PAPER/DATA/Text Data/Samples/HE_sample.csv"
+)
+```
+
+# Mecklenburg-Vorpommern
+
+```{r}
+library(readr)
+library(dplyr)
+library(stringr)
+library(lubridate)
+
+clean_mv_random_ags_subset <- function(file_path,
+                                       start_date = "2013-01-01",
+                                       end_date   = "2025-12-31",
+                                       sample_n   = 500,
+                                       seed       = 123) {
+  
+  normalize_text <- function(x) {
+    x <- as.character(x)
+    x <- str_trim(x)
+    x <- str_squish(x)
+    x <- str_replace_all(x, "[\u2010\u2011\u2012\u2013\u2014\u2212]", "-")
+    x <- str_replace(x, "^\\d+\\s+", "")
+    x
+  }
+  
+  parse_mixed_date <- function(x) {
+    x <- as.character(x)
+    x <- str_trim(x)
+    x[x %in% c("unknown", "NA", "", "null")] <- NA_character_
+    
+    x10 <- substr(x, 1, 10)
+    
+    out <- suppressWarnings(ymd(x10))
+    out <- coalesce(out, suppressWarnings(dmy(x10)))
+    out <- coalesce(out, suppressWarnings(mdy(x10)))
+    
+    out <- coalesce(out, suppressWarnings(ymd(x)))
+    out <- coalesce(out, suppressWarnings(dmy(x)))
+    out <- coalesce(out, suppressWarnings(mdy(x)))
+    
+    out
+  }
+  
+  constituency_to_district_mv <- function(constituency) {
+    constituency_key <- normalize_text(constituency)
+    
+    case_when(
+      str_detect(constituency_key, "Greifswald|Uecker-Randow|Vorpommern-Greifswald") ~ "Vorpommern-Greifswald",
+      str_detect(constituency_key, "Wismar|Nordwestmecklenburg") ~ "Nordwestmecklenburg",
+      str_detect(constituency_key, "Ludwigslust|Parchim") ~ "Ludwigslust-Parchim",
+      str_detect(constituency_key, "Neubrandenburg|Demmin|Müritz|Mecklenburg-Strelitz|Mecklenburgische Seenplatte") ~ "Mecklenburgische Seenplatte",
+      str_detect(constituency_key, "Hansestadt Rostock|Rostock") ~ "Rostock",
+      str_detect(constituency_key, "Stralsund|Rügen|Vorpommern-Rügen") ~ "Vorpommern-Rügen",
+      TRUE ~ NA_character_
+    )
+  }
+  
+  district_to_ags_mv <- function(district) {
+    case_when(
+      district == "Vorpommern-Greifswald" ~ "13075",
+      district == "Nordwestmecklenburg" ~ "13074",
+      district == "Ludwigslust-Parchim" ~ "13076",
+      district == "Mecklenburgische Seenplatte" ~ "13071",
+      district == "Rostock" ~ "13003",
+      district == "Vorpommern-Rügen" ~ "13073",
+      TRUE ~ NA_character_
+    )
+  }
+  
+  df <- read_csv(
+    file_path,
+    locale = locale(encoding = "UTF-8"),
+    show_col_types = FALSE
+  ) %>%
+    rename_with(trimws)
+  
+  required_cols <- c(
+    "Period", "Session", "Date", "Chair", "Interjection",
+    "MPID", "Party", "Constituency", "Speech"
+  )
+  
+  for (col in required_cols) {
+    if (!col %in% names(df)) {
+      df[[col]] <- NA
+    }
+  }
+  
+  df <- df %>%
+    select(all_of(required_cols)) %>%
+    mutate(
+      Period = suppressWarnings(as.integer(Period)),
+      Session = suppressWarnings(as.integer(Session)),
+      MPID = suppressWarnings(as.integer(MPID)),
+      
+      Chair = case_when(
+        Chair %in% c(TRUE, "TRUE", "true", 1, "1") ~ TRUE,
+        Chair %in% c(FALSE, "FALSE", "false", 0, "0") ~ FALSE,
+        TRUE ~ NA
+      ),
+      
+      Interjection = case_when(
+        Interjection %in% c(TRUE, "TRUE", "true", 1, "1") ~ TRUE,
+        Interjection %in% c(FALSE, "FALSE", "false", 0, "0") ~ FALSE,
+        TRUE ~ NA
+      ),
+      
+      Date = parse_mixed_date(Date),
+      Speech = str_squish(as.character(Speech)),
+      Party = as.character(Party),
+      Constituency = as.character(Constituency)
+    ) %>%
+    filter(!is.na(Speech), Speech != "") %>%
+    filter(!is.na(Date)) %>%
+    filter(Date >= as.Date(start_date),
+           Date <= as.Date(end_date))
+  
+  df_clean <- df %>%
+    filter(is.na(Interjection) | Interjection == FALSE)
+  
+  df_clean <- df_clean %>%
+    mutate(
+      new_speech = case_when(
+        row_number() == 1 ~ TRUE,
+        Period != lag(Period) ~ TRUE,
+        Session != lag(Session) ~ TRUE,
+        Date != lag(Date) ~ TRUE,
+        MPID != lag(MPID) ~ TRUE,
+        Chair != lag(Chair) ~ TRUE,
+        TRUE ~ FALSE
+      ),
+      speech_group = cumsum(new_speech)
+    )
+  
+  speeches <- df_clean %>%
+    group_by(speech_group) %>%
+    summarise(
+      Period = first(Period),
+      Session = first(Session),
+      Date = first(Date),
+      MPID = first(MPID),
+      Party = first(Party),
+      Constituency = first(Constituency),
+      Chair = first(Chair),
+      Speech = str_squish(str_c(Speech, collapse = " ")),
+      n_rows_merged = n(),
+      .groups = "drop"
+    ) %>%
+    mutate(
+      state = "Mecklenburg-Vorpommern",
+      constituency_key = normalize_text(Constituency),
+      district = constituency_to_district_mv(constituency_key),
+      ags = district_to_ags_mv(district),
+      n_words = str_count(Speech, "\\S+")
+    ) %>%
+    filter(n_words >= 5) %>%
+    filter(!is.na(district), !is.na(ags)) %>%
+    select(
+      state, ags, district, Period, Session, Date, MPID, Party,
+      Constituency, constituency_key, Chair, Speech, n_rows_merged, n_words
+    )
+  
+  set.seed(seed)
+  
+  n_to_sample <- min(sample_n, nrow(speeches))
+  
+  if (n_to_sample == 0) {
+    warning("No speeches matched the Mecklenburg-Vorpommern AGS mapping and date filters.")
+    return(speeches)
+  }
+  
+  sampled_speeches <- speeches %>%
+    slice_sample(n = n_to_sample)
+  
+  return(sampled_speeches)
+}
+
+mv_sample <- clean_mv_random_ags_subset(
+  file_path = "/Users/diananichvoloda/Library/CloudStorage/GoogleDrive-diananichvoloda@college.harvard.edu/My Drive/2025-2026/Econ 1425/PAPER/DATA/Text Data/Mecklenburg-Vorpommern.csv",
+  start_date = "2013-01-01",
+  end_date   = "2025-12-31",
+  sample_n   = 300,
+  seed       = 42
+)
+
+write_csv(
+  mv_sample,
+  "/Users/diananichvoloda/Library/CloudStorage/GoogleDrive-diananichvoloda@college.harvard.edu/My Drive/2025-2026/Econ 1425/PAPER/DATA/Text Data/Samples/MV_sample.csv"
+)
+```
+
+# Rheinland-Pfalz
+
+```{r}
+library(readr)
+library(dplyr)
+library(stringr)
+library(lubridate)
+
+clean_rp_random_ags_subset <- function(file_path,
+                                       start_date = "2013-01-01",
+                                       end_date   = "2025-12-31",
+                                       sample_n   = 500,
+                                       seed       = 123) {
+  
+  normalize_text <- function(x) {
+    x <- as.character(x)
+    x <- str_trim(x)
+    x <- str_squish(x)
+    x <- str_replace_all(x, "[\u2010\u2011\u2012\u2013\u2014\u2212]", "-")
+    x <- str_replace(x, "^\\d+\\s+", "")
+    x
+  }
+  
+  parse_mixed_date <- function(x) {
+    x <- as.character(x)
+    x <- str_trim(x)
+    x[x %in% c("unknown", "NA", "", "null")] <- NA_character_
+    
+    x10 <- substr(x, 1, 10)
+    
+    out <- suppressWarnings(ymd(x10))
+    out <- coalesce(out, suppressWarnings(dmy(x10)))
+    out <- coalesce(out, suppressWarnings(mdy(x10)))
+    
+    out <- coalesce(out, suppressWarnings(ymd(x)))
+    out <- coalesce(out, suppressWarnings(dmy(x)))
+    out <- coalesce(out, suppressWarnings(mdy(x)))
+    
+    out
+  }
+  
+  constituency_to_district_rp <- function(constituency) {
+    constituency_key <- normalize_text(constituency)
+    
+    case_when(
+      constituency_key == "Alzey" ~ "Alzey-Worms",
+      constituency_key == "Andernach" ~ "Mayen-Koblenz",
+      constituency_key == "Bad Kreuznach" ~ "Bad Kreuznach",
+      constituency_key == "Bad Marienberg (Westerwald)/Westerburg" ~ "Westerwaldkreis",
+      constituency_key == "Bad Neuenahr-Ahrweiler" ~ "Ahrweiler",
+      constituency_key == "Bendorf/Weißenthurm" ~ "Mayen-Koblenz",
+      constituency_key == "Betzdorf/Kirchen (Sieg)" ~ "Altenkirchen (Westerwald)",
+      constituency_key == "Donnersberg" ~ "Donnersbergkreis",
+      constituency_key == "Frankenthal (Pfalz)" ~ "Frankenthal (Pfalz)",
+      constituency_key == "Kaiserslautern I" ~ "Kaiserslautern",
+      constituency_key == "Kaiserslautern II" ~ "Kaiserslautern, Landkreis",
+      constituency_key == "Kirn/Bad Sobernheim" ~ "Bad Kreuznach",
+      constituency_key == "Kusel" ~ "Kusel",
+      constituency_key == "Linz am Rhein/Rengsdorf" ~ "Neuwied",
+      str_detect(constituency_key, "^Mainz") ~ "Mainz",
+      constituency_key == "Mayen" ~ "Mayen-Koblenz",
+      constituency_key == "Montabaur" ~ "Westerwaldkreis",
+      constituency_key == "Mutterstadt" ~ "Rhein-Pfalz-Kreis",
+      constituency_key == "Neustadt an der Weinstraße" ~ "Neustadt an der Weinstraße",
+      constituency_key == "Pirmasens" ~ "Pirmasens",
+      constituency_key == "Remagen/Sinzig" ~ "Ahrweiler",
+      constituency_key == "Rhein-Hunsrück" ~ "Rhein-Hunsrück-Kreis",
+      constituency_key == "Speyer" ~ "Speyer",
+      constituency_key == "Südliche Weinstraße" ~ "Südliche Weinstraße",
+      constituency_key == "Trier" ~ "Trier",
+      constituency_key == "Vulkaneifel" ~ "Vulkaneifel",
+      constituency_key == "Wittlich" ~ "Bernkastel-Wittlich",
+      constituency_key == "Zweibrücken" ~ "Zweibrücken",
+      TRUE ~ NA_character_
+    )
+  }
+  
+  district_to_ags_rp <- function(district) {
+    case_when(
+      district == "Alzey-Worms" ~ "07331",
+      district == "Mayen-Koblenz" ~ "07137",
+      district == "Bad Kreuznach" ~ "07133",
+      district == "Westerwaldkreis" ~ "07143",
+      district == "Ahrweiler" ~ "07131",
+      district == "Altenkirchen (Westerwald)" ~ "07132",
+      district == "Donnersbergkreis" ~ "07333",
+      district == "Frankenthal (Pfalz)" ~ "07311",
+      district == "Kaiserslautern" ~ "07312",
+      district == "Kaiserslautern, Landkreis" ~ "07335",
+      district == "Kusel" ~ "07336",
+      district == "Neuwied" ~ "07138",
+      district == "Mainz" ~ "07315",
+      district == "Rhein-Pfalz-Kreis" ~ "07338",
+      district == "Neustadt an der Weinstraße" ~ "07316",
+      district == "Pirmasens" ~ "07317",
+      district == "Rhein-Hunsrück-Kreis" ~ "07140",
+      district == "Speyer" ~ "07318",
+      district == "Südliche Weinstraße" ~ "07337",
+      district == "Trier" ~ "07211",
+      district == "Vulkaneifel" ~ "07233",
+      district == "Bernkastel-Wittlich" ~ "07231",
+      district == "Zweibrücken" ~ "07320",
+      TRUE ~ NA_character_
+    )
+  }
+  
+  df <- read_csv(
+    file_path,
+    locale = locale(encoding = "UTF-8"),
+    show_col_types = FALSE
+  ) %>%
+    rename_with(trimws)
+  
+  required_cols <- c(
+    "Period", "Session", "Date", "Chair", "Interjection",
+    "MPID", "Party", "Constituency", "Speech"
+  )
+  
+  for (col in required_cols) {
+    if (!col %in% names(df)) {
+      df[[col]] <- NA
+    }
+  }
+  
+  df <- df %>%
+    select(all_of(required_cols)) %>%
+    mutate(
+      Period = suppressWarnings(as.integer(Period)),
+      Session = suppressWarnings(as.integer(Session)),
+      MPID = suppressWarnings(as.integer(MPID)),
+      
+      Chair = case_when(
+        Chair %in% c(TRUE, "TRUE", "true", 1, "1") ~ TRUE,
+        Chair %in% c(FALSE, "FALSE", "false", 0, "0") ~ FALSE,
+        TRUE ~ NA
+      ),
+      
+      Interjection = case_when(
+        Interjection %in% c(TRUE, "TRUE", "true", 1, "1") ~ TRUE,
+        Interjection %in% c(FALSE, "FALSE", "false", 0, "0") ~ FALSE,
+        TRUE ~ NA
+      ),
+      
+      Date = parse_mixed_date(Date),
+      Speech = str_squish(as.character(Speech)),
+      Party = as.character(Party),
+      Constituency = as.character(Constituency)
+    ) %>%
+    filter(!is.na(Speech), Speech != "") %>%
+    filter(!is.na(Date)) %>%
+    filter(Date >= as.Date(start_date),
+           Date <= as.Date(end_date))
+  
+  df_clean <- df %>%
+    filter(is.na(Interjection) | Interjection == FALSE)
+  
+  df_clean <- df_clean %>%
+    mutate(
+      new_speech = case_when(
+        row_number() == 1 ~ TRUE,
+        Period != lag(Period) ~ TRUE,
+        Session != lag(Session) ~ TRUE,
+        Date != lag(Date) ~ TRUE,
+        MPID != lag(MPID) ~ TRUE,
+        Chair != lag(Chair) ~ TRUE,
+        TRUE ~ FALSE
+      ),
+      speech_group = cumsum(new_speech)
+    )
+  
+  speeches <- df_clean %>%
+    group_by(speech_group) %>%
+    summarise(
+      Period = first(Period),
+      Session = first(Session),
+      Date = first(Date),
+      MPID = first(MPID),
+      Party = first(Party),
+      Constituency = first(Constituency),
+      Chair = first(Chair),
+      Speech = str_squish(str_c(Speech, collapse = " ")),
+      n_rows_merged = n(),
+      .groups = "drop"
+    ) %>%
+    mutate(
+      state = "Rheinland-Pfalz",
+      constituency_key = normalize_text(Constituency),
+      district = constituency_to_district_rp(constituency_key),
+      ags = district_to_ags_rp(district),
+      n_words = str_count(Speech, "\\S+")
+    ) %>%
+    filter(n_words >= 5) %>%
+    filter(!is.na(district), !is.na(ags)) %>%
+    select(
+      state, ags, district, Period, Session, Date, MPID, Party,
+      Constituency, constituency_key, Chair, Speech, n_rows_merged, n_words
+    )
+  
+  set.seed(seed)
+  
+  n_to_sample <- min(sample_n, nrow(speeches))
+  
+  if (n_to_sample == 0) {
+    warning("No speeches matched the Rheinland-Pfalz AGS mapping and date filters.")
+    return(speeches)
+  }
+  
+  sampled_speeches <- speeches %>%
+    slice_sample(n = n_to_sample)
+  
+  return(sampled_speeches)
+}
+
+rp_sample <- clean_rp_random_ags_subset(
+  file_path = "/Users/diananichvoloda/Library/CloudStorage/GoogleDrive-diananichvoloda@college.harvard.edu/My Drive/2025-2026/Econ 1425/PAPER/DATA/Text Data/Rheinland-Pfalz.csv",
+  start_date = "2013-01-01",
+  end_date   = "2025-12-31",
+  sample_n   = 300,
+  seed       = 42
+)
+
+write_csv(
+  rp_sample,
+  "/Users/diananichvoloda/Library/CloudStorage/GoogleDrive-diananichvoloda@college.harvard.edu/My Drive/2025-2026/Econ 1425/PAPER/DATA/Text Data/Samples/RP_sample.csv"
+)
+```
+
+# Saarland
+
+```{r}
+library(readr)
+library(dplyr)
+library(stringr)
+library(lubridate)
+
+clean_sl_random_ags_subset <- function(file_path,
+                                       start_date = "2013-01-01",
+                                       end_date   = "2025-12-31",
+                                       sample_n   = 500,
+                                       seed       = 123) {
+  
+  normalize_text <- function(x) {
+    x <- as.character(x)
+    x <- str_trim(x)
+    x <- str_squish(x)
+    x <- str_replace_all(x, "[\u2010\u2011\u2012\u2013\u2014\u2212]", "-")
+    x <- str_replace(x, "^\\d+\\s+", "")
+    x
+  }
+  
+  parse_mixed_date <- function(x) {
+    x <- as.character(x)
+    x <- str_trim(x)
+    x[x %in% c("unknown", "NA", "", "null")] <- NA_character_
+    
+    x10 <- substr(x, 1, 10)
+    
+    out <- suppressWarnings(ymd(x10))
+    out <- coalesce(out, suppressWarnings(dmy(x10)))
+    out <- coalesce(out, suppressWarnings(mdy(x10)))
+    
+    out <- coalesce(out, suppressWarnings(ymd(x)))
+    out <- coalesce(out, suppressWarnings(dmy(x)))
+    out <- coalesce(out, suppressWarnings(mdy(x)))
+    
+    out
+  }
+  
+  constituency_to_district_sl <- function(constituency) {
+    constituency_key <- normalize_text(constituency)
+    
+    case_when(
+      constituency_key == "Neunkirchen" ~ "Neunkirchen",
+      constituency_key == "Saarbrücken" ~ "Regionalverband Saarbrücken",
+      constituency_key == "Saarlouis" ~ "Saarlouis",
+      TRUE ~ NA_character_
+    )
+  }
+  
+  district_to_ags_sl <- function(district) {
+    case_when(
+      district == "Neunkirchen" ~ "10043",
+      district == "Regionalverband Saarbrücken" ~ "10041",
+      district == "Saarlouis" ~ "10044",
+      TRUE ~ NA_character_
+    )
+  }
+  
+  df <- read_csv(
+    file_path,
+    locale = locale(encoding = "UTF-8"),
+    show_col_types = FALSE
+  ) %>%
+    rename_with(trimws)
+  
+  required_cols <- c(
+    "Period", "Session", "Date", "Chair", "Interjection",
+    "MPID", "Party", "Constituency", "Speech"
+  )
+  
+  for (col in required_cols) {
+    if (!col %in% names(df)) {
+      df[[col]] <- NA
+    }
+  }
+  
+  df <- df %>%
+    select(all_of(required_cols)) %>%
+    mutate(
+      Period = suppressWarnings(as.integer(Period)),
+      Session = suppressWarnings(as.integer(Session)),
+      MPID = suppressWarnings(as.integer(MPID)),
+      
+      Chair = case_when(
+        Chair %in% c(TRUE, "TRUE", "true", 1, "1") ~ TRUE,
+        Chair %in% c(FALSE, "FALSE", "false", 0, "0") ~ FALSE,
+        TRUE ~ NA
+      ),
+      
+      Interjection = case_when(
+        Interjection %in% c(TRUE, "TRUE", "true", 1, "1") ~ TRUE,
+        Interjection %in% c(FALSE, "FALSE", "false", 0, "0") ~ FALSE,
+        TRUE ~ NA
+      ),
+      
+      Date = parse_mixed_date(Date),
+      Speech = str_squish(as.character(Speech)),
+      Party = as.character(Party),
+      Constituency = as.character(Constituency)
+    ) %>%
+    filter(!is.na(Speech), Speech != "") %>%
+    filter(!is.na(Date)) %>%
+    filter(Date >= as.Date(start_date),
+           Date <= as.Date(end_date))
+  
+  df_clean <- df %>%
+    filter(is.na(Interjection) | Interjection == FALSE)
+  
+  df_clean <- df_clean %>%
+    mutate(
+      new_speech = case_when(
+        row_number() == 1 ~ TRUE,
+        Period != lag(Period) ~ TRUE,
+        Session != lag(Session) ~ TRUE,
+        Date != lag(Date) ~ TRUE,
+        MPID != lag(MPID) ~ TRUE,
+        Chair != lag(Chair) ~ TRUE,
+        TRUE ~ FALSE
+      ),
+      speech_group = cumsum(new_speech)
+    )
+  
+  speeches <- df_clean %>%
+    group_by(speech_group) %>%
+    summarise(
+      Period = first(Period),
+      Session = first(Session),
+      Date = first(Date),
+      MPID = first(MPID),
+      Party = first(Party),
+      Constituency = first(Constituency),
+      Chair = first(Chair),
+      Speech = str_squish(str_c(Speech, collapse = " ")),
+      n_rows_merged = n(),
+      .groups = "drop"
+    ) %>%
+    mutate(
+      state = "Saarland",
+      constituency_key = normalize_text(Constituency),
+      district = constituency_to_district_sl(constituency_key),
+      ags = district_to_ags_sl(district),
+      n_words = str_count(Speech, "\\S+")
+    ) %>%
+    filter(n_words >= 5) %>%
+    filter(!is.na(district), !is.na(ags)) %>%
+    select(
+      state, ags, district, Period, Session, Date, MPID, Party,
+      Constituency, constituency_key, Chair, Speech, n_rows_merged, n_words
+    )
+  
+  set.seed(seed)
+  
+  n_to_sample <- min(sample_n, nrow(speeches))
+  
+  if (n_to_sample == 0) {
+    warning("No speeches matched the Saarland AGS mapping and date filters.")
+    return(speeches)
+  }
+  
+  sampled_speeches <- speeches %>%
+    slice_sample(n = n_to_sample)
+  
+  return(sampled_speeches)
+}
+
+sl_sample <- clean_sl_random_ags_subset(
+  file_path = "/Users/diananichvoloda/Library/CloudStorage/GoogleDrive-diananichvoloda@college.harvard.edu/My Drive/2025-2026/Econ 1425/PAPER/DATA/Text Data/Saarland.csv",
+  start_date = "2013-01-01",
+  end_date   = "2025-12-31",
+  sample_n   = 300,
+  seed       = 42
+)
+
+write_csv(
+  sl_sample,
+  "/Users/diananichvoloda/Library/CloudStorage/GoogleDrive-diananichvoloda@college.harvard.edu/My Drive/2025-2026/Econ 1425/PAPER/DATA/Text Data/Samples/SL_sample.csv"
+)
+```
+
+# Sachsen-Anhalt
+
+```{r}
+library(readr)
+library(dplyr)
+library(stringr)
+library(lubridate)
+
+clean_st_random_ags_subset <- function(file_path,
+                                       start_date = "2013-01-01",
+                                       end_date   = "2025-12-31",
+                                       sample_n   = 500,
+                                       seed       = 123) {
+  
+  normalize_text <- function(x) {
+    x <- as.character(x)
+    x <- str_trim(x)
+    x <- str_squish(x)
+    x <- str_replace_all(x, "[\u2010\u2011\u2012\u2013\u2014\u2212]", "-")
+    x <- str_replace(x, "^\\d+\\s+", "")
+    x
+  }
+  
+  parse_mixed_date <- function(x) {
+    x <- as.character(x)
+    x <- str_trim(x)
+    x[x %in% c("unknown", "NA", "", "null")] <- NA_character_
+    
+    x10 <- substr(x, 1, 10)
+    
+    out <- suppressWarnings(ymd(x10))
+    out <- coalesce(out, suppressWarnings(dmy(x10)))
+    out <- coalesce(out, suppressWarnings(mdy(x10)))
+    
+    out <- coalesce(out, suppressWarnings(ymd(x)))
+    out <- coalesce(out, suppressWarnings(dmy(x)))
+    out <- coalesce(out, suppressWarnings(mdy(x)))
+    
+    out
+  }
+  
+  constituency_to_district_st <- function(constituency) {
+    constituency_key <- normalize_text(constituency)
+    
+    case_when(
+      constituency_key == "Salzwedel" ~ "Altmarkkreis Salzwedel",
+      constituency_key %in% c("Havelberg-Osterburg", "Havelberg-Osterburg") ~ "Stendal",
+      constituency_key %in% c("Genthin", "Burg") ~ "Jerichower Land",
+      constituency_key %in% c("Wolmirstedt", "Oschersleben", "Wanzleben") ~ "Börde",
+      str_detect(constituency_key, "^Magdeburg") ~ "Magdeburg",
+      constituency_key %in% c("Halberstadt", "Blankenburg", "Wernigerode", "Quedlinburg") ~ "Harz",
+      constituency_key %in% c("Staßfurt", "Aschersleben", "Schönebeck", "Bernburg") ~ "Salzlandkreis",
+      constituency_key %in% c("Köthen", "Bitterfeld-Wolfen", "Wolfen") ~ "Anhalt-Bitterfeld",
+      constituency_key %in% c("Wittenberg", "Jessen") ~ "Wittenberg",
+      str_detect(constituency_key, "^Dessau-Roßlau$") ~ "Dessau-Roßlau",
+      constituency_key %in% c("Sangerhausen", "Eisleben") ~ "Mansfeld-Südharz",
+      constituency_key %in% c("Saalekreis", "Bad Dürrenberg-Saalekreis", "Merseburg", "Querfurt") ~ "Saalekreis",
+      str_detect(constituency_key, "^Halle") ~ "Halle (Saale)",
+      constituency_key %in% c("Zeitz", "Nebra") ~ "Burgenlandkreis",
+      TRUE ~ NA_character_
+    )
+  }
+  
+  district_to_ags_st <- function(district) {
+    case_when(
+      district == "Altmarkkreis Salzwedel" ~ "15081",
+      district == "Stendal" ~ "15090",
+      district == "Jerichower Land" ~ "15086",
+      district == "Börde" ~ "15083",
+      district == "Magdeburg" ~ "15003",
+      district == "Harz" ~ "15085",
+      district == "Salzlandkreis" ~ "15089",
+      district == "Anhalt-Bitterfeld" ~ "15082",
+      district == "Wittenberg" ~ "15091",
+      district == "Dessau-Roßlau" ~ "15001",
+      district == "Mansfeld-Südharz" ~ "15087",
+      district == "Saalekreis" ~ "15088",
+      district == "Halle (Saale)" ~ "15002",
+      district == "Burgenlandkreis" ~ "15084",
+      TRUE ~ NA_character_
+    )
+  }
+  
+  df <- read_csv(
+    file_path,
+    locale = locale(encoding = "UTF-8"),
+    show_col_types = FALSE
+  ) %>%
+    rename_with(trimws)
+  
+  required_cols <- c(
+    "Period", "Session", "Date", "Chair", "Interjection",
+    "MPID", "Party", "Constituency", "Speech"
+  )
+  
+  for (col in required_cols) {
+    if (!col %in% names(df)) {
+      df[[col]] <- NA
+    }
+  }
+  
+  df <- df %>%
+    select(all_of(required_cols)) %>%
+    mutate(
+      Period = suppressWarnings(as.integer(Period)),
+      Session = suppressWarnings(as.integer(Session)),
+      MPID = suppressWarnings(as.integer(MPID)),
+      
+      Chair = case_when(
+        Chair %in% c(TRUE, "TRUE", "true", 1, "1") ~ TRUE,
+        Chair %in% c(FALSE, "FALSE", "false", 0, "0") ~ FALSE,
+        TRUE ~ NA
+      ),
+      
+      Interjection = case_when(
+        Interjection %in% c(TRUE, "TRUE", "true", 1, "1") ~ TRUE,
+        Interjection %in% c(FALSE, "FALSE", "false", 0, "0") ~ FALSE,
+        TRUE ~ NA
+      ),
+      
+      Date = parse_mixed_date(Date),
+      Speech = str_squish(as.character(Speech)),
+      Party = as.character(Party),
+      Constituency = as.character(Constituency)
+    ) %>%
+    filter(!is.na(Speech), Speech != "") %>%
+    filter(!is.na(Date)) %>%
+    filter(Date >= as.Date(start_date),
+           Date <= as.Date(end_date))
+  
+  df_clean <- df %>%
+    filter(is.na(Interjection) | Interjection == FALSE)
+  
+  df_clean <- df_clean %>%
+    mutate(
+      new_speech = case_when(
+        row_number() == 1 ~ TRUE,
+        Period != lag(Period) ~ TRUE,
+        Session != lag(Session) ~ TRUE,
+        Date != lag(Date) ~ TRUE,
+        MPID != lag(MPID) ~ TRUE,
+        Chair != lag(Chair) ~ TRUE,
+        TRUE ~ FALSE
+      ),
+      speech_group = cumsum(new_speech)
+    )
+  
+  speeches <- df_clean %>%
+    group_by(speech_group) %>%
+    summarise(
+      Period = first(Period),
+      Session = first(Session),
+      Date = first(Date),
+      MPID = first(MPID),
+      Party = first(Party),
+      Constituency = first(Constituency),
+      Chair = first(Chair),
+      Speech = str_squish(str_c(Speech, collapse = " ")),
+      n_rows_merged = n(),
+      .groups = "drop"
+    ) %>%
+    mutate(
+      state = "Sachsen-Anhalt",
+      constituency_key = normalize_text(Constituency),
+      district = constituency_to_district_st(constituency_key),
+      ags = district_to_ags_st(district),
+      n_words = str_count(Speech, "\\S+")
+    ) %>%
+    filter(n_words >= 5) %>%
+    filter(!is.na(district), !is.na(ags)) %>%
+    select(
+      state, ags, district, Period, Session, Date, MPID, Party,
+      Constituency, constituency_key, Chair, Speech, n_rows_merged, n_words
+    )
+  
+  set.seed(seed)
+  
+  n_to_sample <- min(sample_n, nrow(speeches))
+  
+  if (n_to_sample == 0) {
+    warning("No speeches matched the Sachsen-Anhalt AGS mapping and date filters.")
+    return(speeches)
+  }
+  
+  sampled_speeches <- speeches %>%
+    slice_sample(n = n_to_sample)
+  
+  return(sampled_speeches)
+}
+
+st_sample <- clean_st_random_ags_subset(
+  file_path = "/Users/diananichvoloda/Library/CloudStorage/GoogleDrive-diananichvoloda@college.harvard.edu/My Drive/2025-2026/Econ 1425/PAPER/DATA/Text Data/Sachsen-Anhalt.csv",
+  start_date = "2013-01-01",
+  end_date   = "2025-12-31",
+  sample_n   = 300,
+  seed       = 42
+)
+
+write_csv(
+  st_sample,
+  "/Users/diananichvoloda/Library/CloudStorage/GoogleDrive-diananichvoloda@college.harvard.edu/My Drive/2025-2026/Econ 1425/PAPER/DATA/Text Data/Samples/ST_sample.csv"
+)
+```
+
+# Sachsen
+
+```{r}
+library(readr)
+library(dplyr)
+library(stringr)
+library(lubridate)
+
+clean_sn_random_ags_subset <- function(file_path,
+                                       start_date = "2013-01-01",
+                                       end_date   = "2025-12-31",
+                                       sample_n   = 500,
+                                       seed       = 123) {
+  
+  normalize_text <- function(x) {
+    x <- as.character(x)
+    x <- str_trim(x)
+    x <- str_squish(x)
+    x <- str_replace_all(x, "[\u2010\u2011\u2012\u2013\u2014\u2212]", "-")
+    x <- str_replace(x, "^\\d+\\s+", "")
+    x
+  }
+  
+  parse_mixed_date <- function(x) {
+    x <- as.character(x)
+    x <- str_trim(x)
+    x[x %in% c("unknown", "NA", "", "null")] <- NA_character_
+    
+    x10 <- substr(x, 1, 10)
+    
+    out <- suppressWarnings(ymd(x10))
+    out <- coalesce(out, suppressWarnings(dmy(x10)))
+    out <- coalesce(out, suppressWarnings(mdy(x10)))
+    
+    out <- coalesce(out, suppressWarnings(ymd(x)))
+    out <- coalesce(out, suppressWarnings(dmy(x)))
+    out <- coalesce(out, suppressWarnings(mdy(x)))
+    
+    out
+  }
+  
+  # Conservative Sachsen lookup created from constituency naming patterns:
+  # map only when the constituency name clearly identifies a single Kreis/city.
+  constituency_to_ags_sn <- function(constituency) {
+    constituency_key <- normalize_text(constituency)
+    
+    case_when(
+      str_detect(constituency_key, "^Vogtland") ~ "14523",
+      str_detect(constituency_key, "^Zwickau") ~ "14524",
+      str_detect(constituency_key, "^Chemnitz") ~ "14511",
+      str_detect(constituency_key, "^Erzgeb") ~ "14521",
+      str_detect(constituency_key, "^Mittelsachsen") ~ "14522",
+      str_detect(constituency_key, "^Dresden") ~ "14612",
+      str_detect(constituency_key, "^Bautzen") ~ "14625",
+      str_detect(constituency_key, "^Gorlitz|^Görlitz") ~ "14626",
+      str_detect(constituency_key, "^Meissen|^Meißen") ~ "14627",
+      str_detect(constituency_key, "^Sachsische Schweiz-Osterzgebirge|^Sächsische Schweiz-Osterzgebirge") ~ "14628",
+      str_detect(constituency_key, "^Leipzig ") ~ "14713",
+      str_detect(constituency_key, "^Nordsachsen") ~ "14730",
+      TRUE ~ NA_character_
+    )
+  }
+  
+  ags_to_district_sn <- function(ags) {
+    case_when(
+      ags == "14523" ~ "Vogtlandkreis",
+      ags == "14524" ~ "Zwickau",
+      ags == "14511" ~ "Chemnitz",
+      ags == "14521" ~ "Erzgebirgskreis",
+      ags == "14522" ~ "Mittelsachsen",
+      ags == "14612" ~ "Dresden",
+      ags == "14625" ~ "Bautzen",
+      ags == "14626" ~ "Görlitz",
+      ags == "14627" ~ "Meißen",
+      ags == "14628" ~ "Sächsische Schweiz-Osterzgebirge",
+      ags == "14713" ~ "Leipzig",
+      ags == "14730" ~ "Nordsachsen",
+      TRUE ~ NA_character_
+    )
+  }
+  
+  df <- read_csv(
+    file_path,
+    locale = locale(encoding = "UTF-8"),
+    show_col_types = FALSE
+  ) %>%
+    rename_with(trimws)
+  
+  required_cols <- c(
+    "Period", "Session", "Date", "Chair", "Interjection",
+    "MPID", "Party", "Constituency", "Speech"
+  )
+  
+  for (col in required_cols) {
+    if (!col %in% names(df)) {
+      df[[col]] <- NA
+    }
+  }
+  
+  df <- df %>%
+    select(all_of(required_cols)) %>%
+    mutate(
+      Period = suppressWarnings(as.integer(Period)),
+      Session = suppressWarnings(as.integer(Session)),
+      MPID = suppressWarnings(as.integer(MPID)),
+      
+      Chair = case_when(
+        Chair %in% c(TRUE, "TRUE", "true", 1, "1") ~ TRUE,
+        Chair %in% c(FALSE, "FALSE", "false", 0, "0") ~ FALSE,
+        TRUE ~ NA
+      ),
+      
+      Interjection = case_when(
+        Interjection %in% c(TRUE, "TRUE", "true", 1, "1") ~ TRUE,
+        Interjection %in% c(FALSE, "FALSE", "false", 0, "0") ~ FALSE,
+        TRUE ~ NA
+      ),
+      
+      Date = parse_mixed_date(Date),
+      Speech = str_squish(as.character(Speech)),
+      Party = as.character(Party),
+      Constituency = as.character(Constituency)
+    ) %>%
+    filter(!is.na(Speech), Speech != "") %>%
+    filter(!is.na(Date)) %>%
+    filter(Date >= as.Date(start_date),
+           Date <= as.Date(end_date))
+  
+  df_clean <- df %>%
+    filter(is.na(Interjection) | Interjection == FALSE)
+  
+  df_clean <- df_clean %>%
+    mutate(
+      new_speech = case_when(
+        row_number() == 1 ~ TRUE,
+        Period != lag(Period) ~ TRUE,
+        Session != lag(Session) ~ TRUE,
+        Date != lag(Date) ~ TRUE,
+        MPID != lag(MPID) ~ TRUE,
+        Chair != lag(Chair) ~ TRUE,
+        TRUE ~ FALSE
+      ),
+      speech_group = cumsum(new_speech)
+    )
+  
+  speeches <- df_clean %>%
+    group_by(speech_group) %>%
+    summarise(
+      Period = first(Period),
+      Session = first(Session),
+      Date = first(Date),
+      MPID = first(MPID),
+      Party = first(Party),
+      Constituency = first(Constituency),
+      Chair = first(Chair),
+      Speech = str_squish(str_c(Speech, collapse = " ")),
+      n_rows_merged = n(),
+      .groups = "drop"
+    ) %>%
+    mutate(
+      state = "Sachsen",
+      constituency_key = normalize_text(Constituency),
+      ags = constituency_to_ags_sn(constituency_key),
+      district = ags_to_district_sn(ags),
+      n_words = str_count(Speech, "\\S+")
+    ) %>%
+    filter(n_words >= 5) %>%
+    filter(!is.na(ags)) %>%
+    select(
+      state, ags, district, Period, Session, Date, MPID, Party,
+      Constituency, constituency_key, Chair, Speech, n_rows_merged, n_words
+    )
+  
+  set.seed(seed)
+  
+  n_to_sample <- min(sample_n, nrow(speeches))
+  
+  if (n_to_sample == 0) {
+    warning("No speeches matched the Sachsen AGS mapping and date filters.")
+    return(speeches)
+  }
+  
+  sampled_speeches <- speeches %>%
+    slice_sample(n = n_to_sample)
+  
+  return(sampled_speeches)
+}
+
+sn_sample <- clean_sn_random_ags_subset(
+  file_path = "/Users/diananichvoloda/Library/CloudStorage/GoogleDrive-diananichvoloda@college.harvard.edu/My Drive/2025-2026/Econ 1425/PAPER/DATA/Text Data/Sachsen.csv",
+  start_date = "2013-01-01",
+  end_date   = "2025-12-31",
+  sample_n   = 300,
+  seed       = 42
+)
+
+write_csv(
+  sn_sample,
+  "/Users/diananichvoloda/Library/CloudStorage/GoogleDrive-diananichvoloda@college.harvard.edu/My Drive/2025-2026/Econ 1425/PAPER/DATA/Text Data/Samples/SN_sample.csv"
+)
+```
+
+# Schleswig-Holstein
+
+```{r}
+library(readr)
+library(dplyr)
+library(stringr)
+library(lubridate)
+
+clean_sh_random_ags_subset <- function(file_path,
+                                       start_date = "2013-01-01",
+                                       end_date   = "2025-12-31",
+                                       sample_n   = 500,
+                                       seed       = 123) {
+  
+  normalize_text <- function(x) {
+    x <- as.character(x)
+    x <- str_trim(x)
+    x <- str_squish(x)
+    x <- str_replace_all(x, "[\u2010\u2011\u2012\u2013\u2014\u2212]", "-")
+    x <- str_replace(x, "^\\d+\\s+", "")
+    x
+  }
+  
+  parse_mixed_date <- function(x) {
+    x <- as.character(x)
+    x <- str_trim(x)
+    x[x %in% c("unknown", "NA", "", "null")] <- NA_character_
+    
+    x10 <- substr(x, 1, 10)
+    
+    out <- suppressWarnings(ymd(x10))
+    out <- coalesce(out, suppressWarnings(dmy(x10)))
+    out <- coalesce(out, suppressWarnings(mdy(x10)))
+    
+    out <- coalesce(out, suppressWarnings(ymd(x)))
+    out <- coalesce(out, suppressWarnings(dmy(x)))
+    out <- coalesce(out, suppressWarnings(mdy(x)))
+    
+    out
+  }
+  
+  constituency_to_district_sh <- function(constituency) {
+    constituency_key <- normalize_text(constituency)
+    
+    case_when(
+      constituency_key == "Dithmarschen-Süd" ~ "Dithmarschen",
+      constituency_key == "Eckernförde" ~ "Rendsburg-Eckernförde",
+      constituency_key == "Flensburg" ~ "Flensburg",
+      constituency_key == "Flensburg-Land" ~ "Schleswig-Flensburg",
+      constituency_key == "Kiel-Ost" ~ "Kiel",
+      constituency_key == "Lauenburg-Nord" ~ "Herzogtum Lauenburg",
+      constituency_key == "Lübeck-Süd" ~ "Lübeck",
+      constituency_key == "Neumünster" ~ "Neumünster",
+      constituency_key == "Nordfriesland-Nord" ~ "Nordfriesland",
+      str_detect(constituency_key, "^Pinneberg") ~ "Pinneberg",
+      constituency_key == "Plön-Nord" ~ "Plön",
+      constituency_key == "Rendsburg" ~ "Rendsburg-Eckernförde",
+      constituency_key == "Segeberg-Ost" ~ "Segeberg",
+      str_detect(constituency_key, "^Steinburg") ~ "Steinburg",
+      str_detect(constituency_key, "^Stormarn") ~ "Stormarn",
+      TRUE ~ NA_character_
+    )
+  }
+  
+  district_to_ags_sh <- function(district) {
+    case_when(
+      district == "Dithmarschen" ~ "01051",
+      district == "Rendsburg-Eckernförde" ~ "01058",
+      district == "Flensburg" ~ "01001",
+      district == "Schleswig-Flensburg" ~ "01059",
+      district == "Kiel" ~ "01002",
+      district == "Herzogtum Lauenburg" ~ "01053",
+      district == "Lübeck" ~ "01003",
+      district == "Neumünster" ~ "01004",
+      district == "Nordfriesland" ~ "01054",
+      district == "Pinneberg" ~ "01056",
+      district == "Plön" ~ "01057",
+      district == "Segeberg" ~ "01060",
+      district == "Steinburg" ~ "01061",
+      district == "Stormarn" ~ "01062",
+      TRUE ~ NA_character_
+    )
+  }
+  
+  df <- read_csv(
+    file_path,
+    locale = locale(encoding = "UTF-8"),
+    show_col_types = FALSE
+  ) %>%
+    rename_with(trimws)
+  
+  required_cols <- c(
+    "Period", "Session", "Date", "Chair", "Interjection",
+    "MPID", "Party", "Constituency", "Speech"
+  )
+  
+  for (col in required_cols) {
+    if (!col %in% names(df)) {
+      df[[col]] <- NA
+    }
+  }
+  
+  df <- df %>%
+    select(all_of(required_cols)) %>%
+    mutate(
+      Period = suppressWarnings(as.integer(Period)),
+      Session = suppressWarnings(as.integer(Session)),
+      MPID = suppressWarnings(as.integer(MPID)),
+      
+      Chair = case_when(
+        Chair %in% c(TRUE, "TRUE", "true", 1, "1") ~ TRUE,
+        Chair %in% c(FALSE, "FALSE", "false", 0, "0") ~ FALSE,
+        TRUE ~ NA
+      ),
+      
+      Interjection = case_when(
+        Interjection %in% c(TRUE, "TRUE", "true", 1, "1") ~ TRUE,
+        Interjection %in% c(FALSE, "FALSE", "false", 0, "0") ~ FALSE,
+        TRUE ~ NA
+      ),
+      
+      Date = parse_mixed_date(Date),
+      Speech = str_squish(as.character(Speech)),
+      Party = as.character(Party),
+      Constituency = as.character(Constituency)
+    ) %>%
+    filter(!is.na(Speech), Speech != "") %>%
+    filter(!is.na(Date)) %>%
+    filter(Date >= as.Date(start_date),
+           Date <= as.Date(end_date))
+  
+  df_clean <- df %>%
+    filter(is.na(Interjection) | Interjection == FALSE)
+  
+  df_clean <- df_clean %>%
+    mutate(
+      new_speech = case_when(
+        row_number() == 1 ~ TRUE,
+        Period != lag(Period) ~ TRUE,
+        Session != lag(Session) ~ TRUE,
+        Date != lag(Date) ~ TRUE,
+        MPID != lag(MPID) ~ TRUE,
+        Chair != lag(Chair) ~ TRUE,
+        TRUE ~ FALSE
+      ),
+      speech_group = cumsum(new_speech)
+    )
+  
+  speeches <- df_clean %>%
+    group_by(speech_group) %>%
+    summarise(
+      Period = first(Period),
+      Session = first(Session),
+      Date = first(Date),
+      MPID = first(MPID),
+      Party = first(Party),
+      Constituency = first(Constituency),
+      Chair = first(Chair),
+      Speech = str_squish(str_c(Speech, collapse = " ")),
+      n_rows_merged = n(),
+      .groups = "drop"
+    ) %>%
+    mutate(
+      state = "Schleswig-Holstein",
+      constituency_key = normalize_text(Constituency),
+      district = constituency_to_district_sh(constituency_key),
+      ags = district_to_ags_sh(district),
+      n_words = str_count(Speech, "\\S+")
+    ) %>%
+    filter(n_words >= 5) %>%
+    filter(!is.na(district), !is.na(ags)) %>%
+    select(
+      state, ags, district, Period, Session, Date, MPID, Party,
+      Constituency, constituency_key, Chair, Speech, n_rows_merged, n_words
+    )
+  
+  set.seed(seed)
+  
+  n_to_sample <- min(sample_n, nrow(speeches))
+  
+  if (n_to_sample == 0) {
+    warning("No speeches matched the Schleswig-Holstein AGS mapping and date filters.")
+    return(speeches)
+  }
+  
+  sampled_speeches <- speeches %>%
+    slice_sample(n = n_to_sample)
+  
+  return(sampled_speeches)
+}
+
+sh_sample <- clean_sh_random_ags_subset(
+  file_path = "/Users/diananichvoloda/Library/CloudStorage/GoogleDrive-diananichvoloda@college.harvard.edu/My Drive/2025-2026/Econ 1425/PAPER/DATA/Text Data/Schleswig-Holstein.csv",
+  start_date = "2013-01-01",
+  end_date   = "2025-12-31",
+  sample_n   = 300,
+  seed       = 42
+)
+
+write_csv(
+  sh_sample,
+  "/Users/diananichvoloda/Library/CloudStorage/GoogleDrive-diananichvoloda@college.harvard.edu/My Drive/2025-2026/Econ 1425/PAPER/DATA/Text Data/Samples/SH_sample.csv"
+)
+```
+
+# Thüringen
+
+```{r}
+library(readr)
+library(dplyr)
+library(stringr)
+library(lubridate)
+
+clean_th_random_ags_subset <- function(file_path,
+                                       start_date = "2013-01-01",
+                                       end_date   = "2025-12-31",
+                                       sample_n   = 500,
+                                       seed       = 123) {
+  
+  normalize_text <- function(x) {
+    x <- as.character(x)
+    x <- str_trim(x)
+    x <- str_squish(x)
+    x <- str_replace_all(x, "[\u2010\u2011\u2012\u2013\u2014\u2212]", "-")
+    x <- str_replace(x, "^\\d+\\s+", "")
+    x
+  }
+  
+  parse_mixed_date <- function(x) {
+    x <- as.character(x)
+    x <- str_trim(x)
+    x[x %in% c("unknown", "NA", "", "null")] <- NA_character_
+    
+    x10 <- substr(x, 1, 10)
+    
+    out <- suppressWarnings(ymd(x10))
+    out <- coalesce(out, suppressWarnings(dmy(x10)))
+    out <- coalesce(out, suppressWarnings(mdy(x10)))
+    
+    out <- coalesce(out, suppressWarnings(ymd(x)))
+    out <- coalesce(out, suppressWarnings(dmy(x)))
+    out <- coalesce(out, suppressWarnings(mdy(x)))
+    
+    out
+  }
+  
+  constituency_to_district_th <- function(constituency) {
+    constituency_key <- normalize_text(constituency)
+    
+    case_when(
+      str_detect(constituency_key, "^Eichsfeld") ~ "Eichsfeld",
+      str_detect(constituency_key, "^Erfurt") ~ "Erfurt",
+      str_detect(constituency_key, "^Gera") ~ "Gera",
+      constituency_key == "Gotha II" ~ "Gotha",
+      constituency_key == "Greiz I" ~ "Greiz",
+      str_detect(constituency_key, "^Ilm-Kreis") ~ "Ilm-Kreis",
+      str_detect(constituency_key, "^Jena") ~ "Jena",
+      str_detect(constituency_key, "^Kyffhäuserkreis") ~ "Kyffhäuserkreis",
+      str_detect(constituency_key, "^Nordhausen") ~ "Nordhausen",
+      str_detect(constituency_key, "^Saale-Holzland-Kreis") ~ "Saale-Holzland-Kreis",
+      str_detect(constituency_key, "^Saale-Orla-Kreis") ~ "Saale-Orla-Kreis",
+      str_detect(constituency_key, "^Saalfeld-Rudolstadt") ~ "Saalfeld-Rudolstadt",
+      constituency_key == "Schmalkalden-Meiningen II" ~ "Schmalkalden-Meiningen",
+      constituency_key == "Sonneberg I" ~ "Sonneberg",
+      constituency_key == "Sömmerda II" ~ "Sömmerda",
+      str_detect(constituency_key, "^Unstrut-Hainich-Kreis") ~ "Unstrut-Hainich-Kreis",
+      TRUE ~ NA_character_
+    )
+  }
+  
+  district_to_ags_th <- function(district) {
+    case_when(
+      district == "Eichsfeld" ~ "16061",
+      district == "Erfurt" ~ "16051",
+      district == "Gera" ~ "16052",
+      district == "Gotha" ~ "16067",
+      district == "Greiz" ~ "16076",
+      district == "Ilm-Kreis" ~ "16070",
+      district == "Jena" ~ "16053",
+      district == "Kyffhäuserkreis" ~ "16065",
+      district == "Nordhausen" ~ "16062",
+      district == "Saale-Holzland-Kreis" ~ "16074",
+      district == "Saale-Orla-Kreis" ~ "16075",
+      district == "Saalfeld-Rudolstadt" ~ "16073",
+      district == "Schmalkalden-Meiningen" ~ "16066",
+      district == "Sonneberg" ~ "16072",
+      district == "Sömmerda" ~ "16068",
+      district == "Unstrut-Hainich-Kreis" ~ "16064",
+      TRUE ~ NA_character_
+    )
+  }
+  
+  df <- read_csv(
+    file_path,
+    locale = locale(encoding = "UTF-8"),
+    show_col_types = FALSE
+  ) %>%
+    rename_with(trimws)
+  
+  required_cols <- c(
+    "Period", "Session", "Date", "Chair", "Interjection",
+    "MPID", "Party", "Constituency", "Speech"
+  )
+  
+  for (col in required_cols) {
+    if (!col %in% names(df)) {
+      df[[col]] <- NA
+    }
+  }
+  
+  df <- df %>%
+    select(all_of(required_cols)) %>%
+    mutate(
+      Period = suppressWarnings(as.integer(Period)),
+      Session = suppressWarnings(as.integer(Session)),
+      MPID = suppressWarnings(as.integer(MPID)),
+      
+      Chair = case_when(
+        Chair %in% c(TRUE, "TRUE", "true", 1, "1") ~ TRUE,
+        Chair %in% c(FALSE, "FALSE", "false", 0, "0") ~ FALSE,
+        TRUE ~ NA
+      ),
+      
+      Interjection = case_when(
+        Interjection %in% c(TRUE, "TRUE", "true", 1, "1") ~ TRUE,
+        Interjection %in% c(FALSE, "FALSE", "false", 0, "0") ~ FALSE,
+        TRUE ~ NA
+      ),
+      
+      Date = parse_mixed_date(Date),
+      Speech = str_squish(as.character(Speech)),
+      Party = as.character(Party),
+      Constituency = as.character(Constituency)
+    ) %>%
+    filter(!is.na(Speech), Speech != "") %>%
+    filter(!is.na(Date)) %>%
+    filter(Date >= as.Date(start_date),
+           Date <= as.Date(end_date))
+  
+  df_clean <- df %>%
+    filter(is.na(Interjection) | Interjection == FALSE)
+  
+  df_clean <- df_clean %>%
+    mutate(
+      new_speech = case_when(
+        row_number() == 1 ~ TRUE,
+        Period != lag(Period) ~ TRUE,
+        Session != lag(Session) ~ TRUE,
+        Date != lag(Date) ~ TRUE,
+        MPID != lag(MPID) ~ TRUE,
+        Chair != lag(Chair) ~ TRUE,
+        TRUE ~ FALSE
+      ),
+      speech_group = cumsum(new_speech)
+    )
+  
+  speeches <- df_clean %>%
+    group_by(speech_group) %>%
+    summarise(
+      Period = first(Period),
+      Session = first(Session),
+      Date = first(Date),
+      MPID = first(MPID),
+      Party = first(Party),
+      Constituency = first(Constituency),
+      Chair = first(Chair),
+      Speech = str_squish(str_c(Speech, collapse = " ")),
+      n_rows_merged = n(),
+      .groups = "drop"
+    ) %>%
+    mutate(
+      state = "Thüringen",
+      constituency_key = normalize_text(Constituency),
+      district = constituency_to_district_th(constituency_key),
+      ags = district_to_ags_th(district),
+      n_words = str_count(Speech, "\\S+")
+    ) %>%
+    filter(n_words >= 5) %>%
+    filter(!is.na(district), !is.na(ags)) %>%
+    select(
+      state, ags, district, Period, Session, Date, MPID, Party,
+      Constituency, constituency_key, Chair, Speech, n_rows_merged, n_words
+    )
+  
+  set.seed(seed)
+  
+  n_to_sample <- min(sample_n, nrow(speeches))
+  
+  if (n_to_sample == 0) {
+    warning("No speeches matched the Thüringen AGS mapping and date filters.")
+    return(speeches)
+  }
+  
+  sampled_speeches <- speeches %>%
+    slice_sample(n = n_to_sample)
+  
+  return(sampled_speeches)
+}
+
+th_sample <- clean_th_random_ags_subset(
+  file_path = "/Users/diananichvoloda/Library/CloudStorage/GoogleDrive-diananichvoloda@college.harvard.edu/My Drive/2025-2026/Econ 1425/PAPER/DATA/Text Data/Thüringen.csv",
+  start_date = "2013-01-01",
+  end_date   = "2025-12-31",
+  sample_n   = 300,
+  seed       = 42
+)
+
+write_csv(
+  th_sample,
+  "/Users/diananichvoloda/Library/CloudStorage/GoogleDrive-diananichvoloda@college.harvard.edu/My Drive/2025-2026/Econ 1425/PAPER/DATA/Text Data/Samples/TH_sample.csv"
+)
+```
+
+# Merging Everything
+
+```{r}
+library(readr)
+library(dplyr)
+
+data_dir <- "/Users/diananichvoloda/Library/CloudStorage/GoogleDrive-diananichvoloda@college.harvard.edu/My Drive/2025-2026/Econ 1425/PAPER/DATA/Text Data/200-speech samples"
+
+library(readr)
+library(dplyr)
+
+data_dir <- "/Users/diananichvoloda/Library/CloudStorage/GoogleDrive-diananichvoloda@college.harvard.edu/My Drive/2025-2026/Econ 1425/PAPER/DATA/Text Data/200-speech samples"
+
+all_files <- list.files(
+  path = data_dir,
+  pattern = "\\.csv$",
+  full.names = TRUE
+)
+
+length(all_files)
+basename(all_files)
+
+all_speeches <- lapply(all_files, function(f) {
+  read_csv(f, show_col_types = FALSE)
+}) %>%
+  bind_rows()
+
+dim(all_speeches)
+names(all_speeches)
+
+all_speeches %>% count(state, sort = TRUE)
+
+write_csv(
+  all_speeches,
+  file.path(data_dir, "all_sample_200_merged.csv")
+)
+```
+
+Loading the scored data
+
+```{r}
+all_sample_scored <- read.csv("/Users/diananichvoloda/Library/CloudStorage/GoogleDrive-diananichvoloda@college.harvard.edu/My Drive/2025-2026/Econ 1425/PAPER/DATA/Text Data/all_sample_200_scored.csv")
+
+all_sample_scored <- all_sample_scored %>%
+  select(-ends_with("_y")) %>%
+  rename_with(~ str_remove(.x, "_x$"), ends_with("_x"))
+```
+
+```{r}
+library(dplyr)
+library(stringr)
+library(readr)
+
+constituency_universe <- all_sample_scored %>%
+  transmute(
+    state,
+    Constituency,
+    constituency_name_std = Constituency %>%
+      coalesce("") %>%
+      str_to_lower() %>%
+      str_squish()
+  ) %>%
+  distinct() %>%
+  arrange(state, constituency_name_std)
+
+constituency_universe
+
+write_csv(
+  constituency_universe,
+  "/Users/diananichvoloda/Library/CloudStorage/GoogleDrive-diananichvoloda@college.harvard.edu/My Drive/2025-2026/Econ 1425/PAPER/DATA/constituency_universe.csv"
+)
+```
+
+Cleaning
+
+```{r}
+library(dplyr)
+library(stringr)
+library(readr)
+
+std_text <- function(x) {
+  x %>%
+    coalesce("") %>%
+    str_replace_all("\u00a0", " ") %>%
+    str_squish()
+}
+
+constituency_universe <- all_sample_scored %>%
+  transmute(
+    state = std_text(state),
+    Constituency = std_text(Constituency)
+  ) %>%
+  distinct() %>%
+  mutate(
+    constituency_name_std = Constituency %>%
+      str_to_lower() %>%
+      str_squish(),
+    constituency_key = Constituency %>%
+      str_replace_all("\u00a0", " ") %>%
+      str_squish() %>%
+      str_remove("^\\d+\\s*") %>%                 # remove leading numbers like "01 "
+      str_remove("^Wahlkreis\\s+") %>%           # remove "Wahlkreis "
+      str_remove("^Bezirksliste\\s+") %>%        # remove "Bezirksliste "
+      str_replace("^Landesliste( Platz \\d+)?$", "Landesliste") %>%
+      str_replace("^nur Landesliste$", "Landesliste") %>%
+      str_replace("^Listenmandat$", "Landesliste") %>%
+      str_replace("^–$", "") %>%
+      str_squish()
+  )
+
+constituency_universe
+```
+
+```{r}
+constituency_to_kreis <- constituency_universe %>%
+  mutate(
+    kreis_name = case_when(
+
+      # =========================
+      # CITY STATES
+      # =========================
+      state == "Berlin" ~ "Berlin",
+      state == "Hamburg" & constituency_key != "" ~ "Hamburg",
+      state == "Bremen" & constituency_key %in% c("Bremen Listenwahl", "Bremen Personenwahl", "Bremen, Personenwahl") ~ "Bremen",
+      state == "Bremen" & constituency_key == "Bremerhaven Listenwahl" ~ "Bremerhaven",
+
+      # =========================
+      # BADEN-WUERTTEMBERG
+      # =========================
+      state == "Baden-Württemberg" & str_detect(constituency_key, "^Stuttgart") ~ "Stuttgart",
+      state == "Baden-Württemberg" & constituency_key == "Böblingen" ~ "Böblingen",
+      state == "Baden-Württemberg" & constituency_key == "Leonberg" ~ "Böblingen",
+      state == "Baden-Württemberg" & constituency_key == "Esslingen" ~ "Esslingen",
+      state == "Baden-Württemberg" & constituency_key %in% c("Kirchheim", "Kirchheim unter Teck", "Nürtingen") ~ "Esslingen",
+      state == "Baden-Württemberg" & constituency_key == "Göppingen" ~ "Göppingen",
+      state == "Baden-Württemberg" & constituency_key == "Geislingen" ~ "Göppingen",
+      state == "Baden-Württemberg" & constituency_key == "Ludwigsburg" ~ "Ludwigsburg",
+      state == "Baden-Württemberg" & constituency_key %in% c("Vaihingen", "Bietigheim-Bissingen") ~ "Ludwigsburg",
+      state == "Baden-Württemberg" & constituency_key %in% c("Waiblingen", "Schorndorf", "Backnang") ~ "Rems-Murr-Kreis",
+      state == "Baden-Württemberg" & constituency_key == "Heilbronn" ~ "Heilbronn",
+      state == "Baden-Württemberg" & constituency_key %in% c("Eppingen", "Neckarsulm") ~ "Landkreis Heilbronn",
+      state == "Baden-Württemberg" & constituency_key == "Hohenlohe" ~ "Hohenlohekreis",
+      state == "Baden-Württemberg" & constituency_key == "Schwäbisch Hall" ~ "Schwäbisch Hall",
+      state == "Baden-Württemberg" & constituency_key == "Main-Tauber" ~ "Main-Tauber-Kreis",
+      state == "Baden-Württemberg" & constituency_key == "Heidenheim" ~ "Heidenheim",
+      state == "Baden-Württemberg" & constituency_key == "Schwäbisch Gmünd" ~ "Ostalbkreis",
+      state == "Baden-Württemberg" & constituency_key == "Karlsruhe I" ~ "Karlsruhe",
+      state == "Baden-Württemberg" & constituency_key %in% c("Bruchsal", "Ettlingen") ~ "Landkreis Karlsruhe",
+      state == "Baden-Württemberg" & constituency_key == "Baden-Baden" ~ "Baden-Baden",
+      state == "Baden-Württemberg" & constituency_key == "Heidelberg" ~ "Heidelberg",
+      state == "Baden-Württemberg" & constituency_key %in% c("Mannheim I", "Mannheim II") ~ "Mannheim",
+      state == "Baden-Württemberg" & constituency_key %in% c("Wiesloch", "Weinheim", "Schwetzingen", "Sinsheim") ~ "Rhein-Neckar-Kreis",
+      state == "Baden-Württemberg" & constituency_key == "Neckar-Odenwald" ~ "Neckar-Odenwald-Kreis",
+      state == "Baden-Württemberg" & constituency_key == "Calw" ~ "Calw",
+      state == "Baden-Württemberg" & constituency_key == "Enz" ~ "Enzkreis",
+      state == "Baden-Württemberg" & constituency_key == "Freudenstadt" ~ "Freudenstadt",
+      state == "Baden-Württemberg" & str_detect(constituency_key, "^Freiburg") ~ "Freiburg im Breisgau",
+      state == "Baden-Württemberg" & constituency_key == "Breisgau" ~ "Breisgau-Hochschwarzwald",
+      state == "Baden-Württemberg" & constituency_key == "Emmendingen" ~ "Emmendingen",
+      state == "Baden-Württemberg" & constituency_key == "Lahr" ~ "Ortenaukreis",
+      state == "Baden-Württemberg" & constituency_key == "Rottweil" ~ "Rottweil",
+      state == "Baden-Württemberg" & constituency_key == "Villingen-Schwenningen" ~ "Schwarzwald-Baar-Kreis",
+      state == "Baden-Württemberg" & constituency_key == "Konstanz" ~ "Konstanz",
+      state == "Baden-Württemberg" & constituency_key == "Singen" ~ "Konstanz",
+      state == "Baden-Württemberg" & constituency_key == "Lörrach" ~ "Lörrach",
+      state == "Baden-Württemberg" & constituency_key == "Reutlingen" ~ "Reutlingen",
+      state == "Baden-Württemberg" & constituency_key == "Tübingen" ~ "Tübingen",
+      state == "Baden-Württemberg" & constituency_key == "Balingen" ~ "Zollernalbkreis",
+      state == "Baden-Württemberg" & constituency_key == "Ulm" ~ "Ulm",
+      state == "Baden-Württemberg" & constituency_key == "Ravensburg" ~ "Ravensburg",
+      state == "Baden-Württemberg" & constituency_key == "Sigmaringen" ~ "Sigmaringen",
+
+      # =========================
+      # BAYERN
+      # =========================
+      state == "Bayern" & constituency_key == "Mittelfranken Erlangen-Stadt" ~ "Erlangen",
+      state == "Bayern" & str_detect(constituency_key, "Nürnberg") ~ "Nürnberg",
+      state == "Bayern" & constituency_key == "Niederbayern Deggendorf" ~ "Deggendorf",
+      state == "Bayern" & constituency_key == "Niederbayern Dingolfing" ~ "Dingolfing-Landau",
+      state == "Bayern" & constituency_key == "Niederbayern Landshut" ~ "Landshut",
+      state == "Bayern" & constituency_key == "Oberbayern Eichstätt" ~ "Eichstätt",
+      state == "Bayern" & constituency_key == "Oberbayern Fürstenfeldbruck-Ost" ~ "Fürstenfeldbruck",
+      state == "Bayern" & constituency_key == "Oberbayern Mühldorf am Inn" ~ "Mühldorf a.Inn",
+      state == "Bayern" & str_detect(constituency_key, "München-Giesing|München-Milbertshofen|München-Pasing|München-Ramersdorf|München-Schwabing") ~ "München",
+      state == "Bayern" & constituency_key == "Oberbayern München-Land-Süd" ~ "München, Landkreis",
+      state == "Bayern" & constituency_key == "Oberfranken Bamberg-Stadt" ~ "Bamberg",
+      state == "Bayern" & constituency_key == "Oberfranken Bayreuth" ~ "Bayreuth",
+      state == "Bayern" & constituency_key == "Oberfranken Coburg" ~ "Coburg",
+      state == "Bayern" & constituency_key == "Oberfranken Forchheim" ~ "Forchheim",
+      state == "Bayern" & constituency_key == "Oberfranken Hof" ~ "Hof",
+      state == "Bayern" & constituency_key == "Oberpfalz Cham" ~ "Cham",
+      state == "Bayern" & constituency_key == "Oberpfalz Neumarkt in der Oberpfalz" ~ "Neumarkt i.d.OPf.",
+      state == "Bayern" & constituency_key == "Oberpfalz Regensburg-Stadt" ~ "Regensburg",
+      state == "Bayern" & constituency_key == "Oberpfalz Tirschenreuth" ~ "Tirschenreuth",
+      state == "Bayern" & constituency_key == "Oberpfalz Weiden in der Oberpfalz" ~ "Weiden i.d.OPf.",
+      state == "Bayern" & constituency_key == "Schwaben Aichach-Friedberg" ~ "Aichach-Friedberg",
+      state == "Bayern" & constituency_key == "Schwaben Neu-Ulm" ~ "Neu-Ulm",
+      state == "Bayern" & constituency_key == "Schwaben, Memmingen" ~ "Memmingen",
+      state == "Bayern" & constituency_key == "Unterfranken Aschaffenburg-Ost" ~ "Aschaffenburg",
+      state == "Bayern" & constituency_key == "Unterfranken Schweinfurt" ~ "Schweinfurt",
+      state == "Bayern" & constituency_key == "Unterfranken Würzburg-Land" ~ "Würzburg, Landkreis",
+
+      # =========================
+      # BRANDENBURG
+      # =========================
+      state == "Brandenburg" & str_detect(constituency_key, "^Barnim") ~ "Barnim",
+      state == "Brandenburg" & constituency_key == "Brandenburg an der Havel II" ~ "Brandenburg an der Havel",
+      state == "Brandenburg" & str_detect(constituency_key, "^Cottbus") ~ "Cottbus",
+      state == "Brandenburg" & str_detect(constituency_key, "^Dahme-Spreewald") ~ "Dahme-Spreewald",
+      state == "Brandenburg" & str_detect(constituency_key, "^Elbe-Elster") ~ "Elbe-Elster",
+      state == "Brandenburg" & constituency_key == "Frankfurt (Oder)" ~ "Frankfurt (Oder)",
+      state == "Brandenburg" & str_detect(constituency_key, "^Havelland") ~ "Havelland",
+      state == "Brandenburg" & str_detect(constituency_key, "^Märkisch-Oderland") ~ "Märkisch-Oderland",
+      state == "Brandenburg" & str_detect(constituency_key, "^Oberhavel") ~ "Oberhavel",
+      state == "Brandenburg" & constituency_key == "Oberspreewald-Lausitz I" ~ "Oberspreewald-Lausitz",
+      state == "Brandenburg" & str_detect(constituency_key, "^Oder-Spree") ~ "Oder-Spree",
+      state == "Brandenburg" & constituency_key == "Ostprignitz-Ruppin I" ~ "Ostprignitz-Ruppin",
+      state == "Brandenburg" & str_detect(constituency_key, "^Potsdam I|^Potsdam II") ~ "Potsdam",
+      state == "Brandenburg" & str_detect(constituency_key, "^Potsdam-Mittelmark") ~ "Potsdam-Mittelmark",
+      state == "Brandenburg" & str_detect(constituency_key, "^Teltow-Fläming") ~ "Teltow-Fläming",
+      state == "Brandenburg" & str_detect(constituency_key, "^Uckermark") ~ "Uckermark",
+
+      # =========================
+      # HESSEN
+      # =========================
+      state == "Hessen" & str_detect(constituency_key, "^Bergstraße") ~ "Bergstraße",
+      state == "Hessen" & str_detect(constituency_key, "^Darmstadt-Dieburg") ~ "Darmstadt-Dieburg",
+      state == "Hessen" & constituency_key == "Darmstadt-Stadt I" ~ "Darmstadt",
+      state == "Hessen" & constituency_key == "Eschwege-Witzenhausen" ~ "Werra-Meißner-Kreis",
+      state == "Hessen" & str_detect(constituency_key, "^Frankfurt am Main") ~ "Frankfurt am Main",
+      state == "Hessen" & str_detect(constituency_key, "^Fulda") ~ "Fulda",
+      state == "Hessen" & str_detect(constituency_key, "^Gießen") ~ "Gießen",
+      state == "Hessen" & str_detect(constituency_key, "^Groß-Gerau") ~ "Groß-Gerau",
+      state == "Hessen" & str_detect(constituency_key, "^Hochtaunus") ~ "Hochtaunuskreis",
+      state == "Hessen" & str_detect(constituency_key, "^Kassel-Land") ~ "Kassel, Landkreis",
+      state == "Hessen" & str_detect(constituency_key, "^Kassel-Stadt") ~ "Kassel",
+      state == "Hessen" & str_detect(constituency_key, "^Lahn-Dill") ~ "Lahn-Dill-Kreis",
+      state == "Hessen" & str_detect(constituency_key, "^Limburg-Weilburg") ~ "Limburg-Weilburg",
+      state == "Hessen" & str_detect(constituency_key, "^Marburg-Biedenkopf") ~ "Marburg-Biedenkopf",
+      state == "Hessen" & constituency_key == "Odenwald" ~ "Odenwaldkreis",
+      state == "Hessen" & str_detect(constituency_key, "^Offenbach Land") ~ "Offenbach, Landkreis",
+      state == "Hessen" & constituency_key == "Offenbach-Stadt" ~ "Offenbach am Main",
+      state == "Hessen" & str_detect(constituency_key, "^Rheingau-Taunus") ~ "Rheingau-Taunus-Kreis",
+      state == "Hessen" & constituency_key == "Rotenburg" ~ "Hersfeld-Rotenburg",
+      state == "Hessen" & str_detect(constituency_key, "^Schwalm-Eder") ~ "Schwalm-Eder-Kreis",
+      state == "Hessen" & str_detect(constituency_key, "^Waldeck-Frankenberg") ~ "Waldeck-Frankenberg",
+      state == "Hessen" & str_detect(constituency_key, "^Wetterau") ~ "Wetteraukreis",
+      state == "Hessen" & str_detect(constituency_key, "^Wiesbaden") ~ "Wiesbaden",
+
+      # =========================
+      # MECKLENBURG-VORPOMMERN
+      # =========================
+      state == "Mecklenburg-Vorpommern" & str_detect(constituency_key, "Greifswald|Uecker-Randow|Vorpommern-Greifswald") ~ "Vorpommern-Greifswald",
+      state == "Mecklenburg-Vorpommern" & str_detect(constituency_key, "Wismar|Nordwestmecklenburg") ~ "Nordwestmecklenburg",
+      state == "Mecklenburg-Vorpommern" & str_detect(constituency_key, "Ludwigslust|Parchim") ~ "Ludwigslust-Parchim",
+      state == "Mecklenburg-Vorpommern" & str_detect(constituency_key, "Neubrandenburg|Demmin|Müritz|Mecklenburg-Strelitz|Mecklenburgische Seenplatte") ~ "Mecklenburgische Seenplatte",
+      state == "Mecklenburg-Vorpommern" & str_detect(constituency_key, "Hansestadt Rostock|Rostock") ~ "Rostock",
+      state == "Mecklenburg-Vorpommern" & str_detect(constituency_key, "Stralsund|Rügen|Vorpommern-Rügen") ~ "Vorpommern-Rügen",
+
+      # =========================
+      # RHEINLAND-PFALZ
+      # =========================
+      state == "Rheinland-Pfalz" & constituency_key == "Alzey" ~ "Alzey-Worms",
+      state == "Rheinland-Pfalz" & constituency_key == "Andernach" ~ "Mayen-Koblenz",
+      state == "Rheinland-Pfalz" & constituency_key == "Bad Kreuznach" ~ "Bad Kreuznach",
+      state == "Rheinland-Pfalz" & constituency_key == "Bad Marienberg (Westerwald)/Westerburg" ~ "Westerwaldkreis",
+      state == "Rheinland-Pfalz" & constituency_key == "Bad Neuenahr-Ahrweiler" ~ "Ahrweiler",
+      state == "Rheinland-Pfalz" & constituency_key == "Bendorf/Weißenthurm" ~ "Mayen-Koblenz",
+      state == "Rheinland-Pfalz" & constituency_key == "Betzdorf/Kirchen (Sieg)" ~ "Altenkirchen (Westerwald)",
+      state == "Rheinland-Pfalz" & constituency_key == "Donnersberg" ~ "Donnersbergkreis",
+      state == "Rheinland-Pfalz" & constituency_key == "Frankenthal (Pfalz)" ~ "Frankenthal (Pfalz)",
+      state == "Rheinland-Pfalz" & constituency_key == "Kaiserslautern I" ~ "Kaiserslautern",
+      state == "Rheinland-Pfalz" & constituency_key == "Kaiserslautern II" ~ "Kaiserslautern, Landkreis",
+      state == "Rheinland-Pfalz" & constituency_key == "Kirn/Bad Sobernheim" ~ "Bad Kreuznach",
+      state == "Rheinland-Pfalz" & constituency_key == "Kusel" ~ "Kusel",
+      state == "Rheinland-Pfalz" & constituency_key == "Linz am Rhein/Rengsdorf" ~ "Neuwied",
+      state == "Rheinland-Pfalz" & str_detect(constituency_key, "^Mainz") ~ "Mainz",
+      state == "Rheinland-Pfalz" & constituency_key == "Mayen" ~ "Mayen-Koblenz",
+      state == "Rheinland-Pfalz" & constituency_key == "Montabaur" ~ "Westerwaldkreis",
+      state == "Rheinland-Pfalz" & constituency_key == "Mutterstadt" ~ "Rhein-Pfalz-Kreis",
+      state == "Rheinland-Pfalz" & constituency_key == "Neustadt an der Weinstraße" ~ "Neustadt an der Weinstraße",
+      state == "Rheinland-Pfalz" & constituency_key == "Pirmasens" ~ "Pirmasens",
+      state == "Rheinland-Pfalz" & constituency_key == "Remagen/Sinzig" ~ "Ahrweiler",
+      state == "Rheinland-Pfalz" & constituency_key == "Rhein-Hunsrück" ~ "Rhein-Hunsrück-Kreis",
+      state == "Rheinland-Pfalz" & constituency_key == "Speyer" ~ "Speyer",
+      state == "Rheinland-Pfalz" & constituency_key == "Südliche Weinstraße" ~ "Südliche Weinstraße",
+      state == "Rheinland-Pfalz" & constituency_key == "Trier" ~ "Trier",
+      state == "Rheinland-Pfalz" & constituency_key == "Vulkaneifel" ~ "Vulkaneifel",
+      state == "Rheinland-Pfalz" & constituency_key == "Wittlich" ~ "Bernkastel-Wittlich",
+      state == "Rheinland-Pfalz" & constituency_key == "Zweibrücken" ~ "Zweibrücken",
+
+      # =========================
+      # SAARLAND
+      # =========================
+      state == "Saarland" & constituency_key == "Neunkirchen" ~ "Neunkirchen",
+      state == "Saarland" & constituency_key == "Saarbrücken" ~ "Regionalverband Saarbrücken",
+      state == "Saarland" & constituency_key == "Saarlouis" ~ "Saarlouis",
+
+      # =========================
+      # SACHSEN-ANHALT
+      # =========================
+      state == "Sachsen-Anhalt" & constituency_key == "Salzwedel" ~ "Altmarkkreis Salzwedel",
+      state == "Sachsen-Anhalt" & constituency_key %in% c("Havelberg-Osterburg", "Havelberg-Osterburg") ~ "Stendal",
+      state == "Sachsen-Anhalt" & constituency_key %in% c("Genthin", "Burg") ~ "Jerichower Land",
+      state == "Sachsen-Anhalt" & constituency_key %in% c("Wolmirstedt", "Oschersleben", "Wanzleben") ~ "Börde",
+      state == "Sachsen-Anhalt" & str_detect(constituency_key, "^Magdeburg") ~ "Magdeburg",
+      state == "Sachsen-Anhalt" & constituency_key %in% c("Halberstadt", "Blankenburg", "Wernigerode", "Quedlinburg") ~ "Harz",
+      state == "Sachsen-Anhalt" & constituency_key %in% c("Staßfurt", "Aschersleben", "Schönebeck", "Bernburg") ~ "Salzlandkreis",
+      state == "Sachsen-Anhalt" & constituency_key %in% c("Köthen", "Bitterfeld-Wolfen", "Wolfen") ~ "Anhalt-Bitterfeld",
+      state == "Sachsen-Anhalt" & constituency_key %in% c("Wittenberg", "Jessen") ~ "Wittenberg",
+      state == "Sachsen-Anhalt" & str_detect(constituency_key, "^Dessau-Roßlau$") ~ "Dessau-Roßlau",
+      state == "Sachsen-Anhalt" & constituency_key %in% c("Sangerhausen", "Eisleben") ~ "Mansfeld-Südharz",
+      state == "Sachsen-Anhalt" & constituency_key %in% c("Saalekreis", "Bad Dürrenberg-Saalekreis", "Merseburg", "Querfurt") ~ "Saalekreis",
+      state == "Sachsen-Anhalt" & str_detect(constituency_key, "^Halle") ~ "Halle (Saale)",
+      state == "Sachsen-Anhalt" & constituency_key %in% c("Zeitz", "Nebra") ~ "Burgenlandkreis",
+
+      # =========================
+      # SCHLESWIG-HOLSTEIN
+      # =========================
+      state == "Schleswig-Holstein" & constituency_key == "Dithmarschen-Süd" ~ "Dithmarschen",
+      state == "Schleswig-Holstein" & constituency_key == "Eckernförde" ~ "Rendsburg-Eckernförde",
+      state == "Schleswig-Holstein" & constituency_key == "Flensburg" ~ "Flensburg",
+      state == "Schleswig-Holstein" & constituency_key == "Flensburg-Land" ~ "Schleswig-Flensburg",
+      state == "Schleswig-Holstein" & constituency_key == "Kiel-Ost" ~ "Kiel",
+      state == "Schleswig-Holstein" & constituency_key == "Lauenburg-Nord" ~ "Herzogtum Lauenburg",
+      state == "Schleswig-Holstein" & constituency_key == "Lübeck-Süd" ~ "Lübeck",
+      state == "Schleswig-Holstein" & constituency_key == "Neumünster" ~ "Neumünster",
+      state == "Schleswig-Holstein" & constituency_key == "Nordfriesland-Nord" ~ "Nordfriesland",
+      state == "Schleswig-Holstein" & str_detect(constituency_key, "^Pinneberg") ~ "Pinneberg",
+      state == "Schleswig-Holstein" & constituency_key == "Plön-Nord" ~ "Plön",
+      state == "Schleswig-Holstein" & constituency_key == "Rendsburg" ~ "Rendsburg-Eckernförde",
+      state == "Schleswig-Holstein" & constituency_key == "Segeberg-Ost" ~ "Segeberg",
+      state == "Schleswig-Holstein" & str_detect(constituency_key, "^Steinburg") ~ "Steinburg",
+      state == "Schleswig-Holstein" & str_detect(constituency_key, "^Stormarn") ~ "Stormarn",
+
+      # =========================
+      # THUERINGEN
+      # =========================
+      state == "Thüringen" & str_detect(constituency_key, "^Eichsfeld") ~ "Eichsfeld",
+      state == "Thüringen" & str_detect(constituency_key, "^Erfurt") ~ "Erfurt",
+      state == "Thüringen" & str_detect(constituency_key, "^Gera") ~ "Gera",
+      state == "Thüringen" & constituency_key == "Gotha II" ~ "Gotha",
+      state == "Thüringen" & constituency_key == "Greiz I" ~ "Greiz",
+      state == "Thüringen" & str_detect(constituency_key, "^Ilm-Kreis") ~ "Ilm-Kreis",
+      state == "Thüringen" & str_detect(constituency_key, "^Jena") ~ "Jena",
+      state == "Thüringen" & str_detect(constituency_key, "^Kyffhäuserkreis") ~ "Kyffhäuserkreis",
+      state == "Thüringen" & str_detect(constituency_key, "^Nordhausen") ~ "Nordhausen",
+      state == "Thüringen" & str_detect(constituency_key, "^Saale-Holzland-Kreis") ~ "Saale-Holzland-Kreis",
+      state == "Thüringen" & str_detect(constituency_key, "^Saale-Orla-Kreis") ~ "Saale-Orla-Kreis",
+      state == "Thüringen" & str_detect(constituency_key, "^Saalfeld-Rudolstadt") ~ "Saalfeld-Rudolstadt",
+      state == "Thüringen" & constituency_key == "Schmalkalden-Meiningen II" ~ "Schmalkalden-Meiningen",
+      state == "Thüringen" & constituency_key == "Sonneberg I" ~ "Sonneberg",
+      state == "Thüringen" & constituency_key == "Sömmerda II" ~ "Sömmerda",
+      state == "Thüringen" & str_detect(constituency_key, "^Unstrut-Hainich-Kreis") ~ "Unstrut-Hainich-Kreis",
+
+      TRUE ~ NA_character_
+    ),
+
+    ags = case_when(
+
+      # =========================
+      # CITY STATES
+      # =========================
+      state == "Berlin" ~ "11000",
+      state == "Hamburg" & constituency_key != "" ~ "02000",
+      state == "Bremen" & constituency_key %in% c("Bremen Listenwahl", "Bremen Personenwahl", "Bremen, Personenwahl") ~ "04011",
+      state == "Bremen" & constituency_key == "Bremerhaven Listenwahl" ~ "04012",
+
+      # =========================
+      # BADEN-WUERTTEMBERG
+      # =========================
+      state == "Baden-Württemberg" & str_detect(constituency_key, "^Stuttgart") ~ "08111",
+      state == "Baden-Württemberg" & constituency_key == "Böblingen" ~ "08115",
+      state == "Baden-Württemberg" & constituency_key == "Leonberg" ~ "08115",
+      state == "Baden-Württemberg" & constituency_key == "Esslingen" ~ "08116",
+      state == "Baden-Württemberg" & constituency_key %in% c("Kirchheim", "Kirchheim unter Teck", "Nürtingen") ~ "08116",
+      state == "Baden-Württemberg" & constituency_key == "Göppingen" ~ "08117",
+      state == "Baden-Württemberg" & constituency_key == "Geislingen" ~ "08117",
+      state == "Baden-Württemberg" & constituency_key == "Ludwigsburg" ~ "08118",
+      state == "Baden-Württemberg" & constituency_key %in% c("Vaihingen", "Bietigheim-Bissingen") ~ "08118",
+      state == "Baden-Württemberg" & constituency_key %in% c("Waiblingen", "Schorndorf", "Backnang") ~ "08119",
+      state == "Baden-Württemberg" & constituency_key == "Heilbronn" ~ "08125",
+      state == "Baden-Württemberg" & constituency_key %in% c("Eppingen", "Neckarsulm") ~ "08125",
+      state == "Baden-Württemberg" & constituency_key == "Hohenlohe" ~ "08126",
+      state == "Baden-Württemberg" & constituency_key == "Schwäbisch Hall" ~ "08127",
+      state == "Baden-Württemberg" & constituency_key == "Main-Tauber" ~ "08128",
+      state == "Baden-Württemberg" & constituency_key == "Heidenheim" ~ "08135",
+      state == "Baden-Württemberg" & constituency_key == "Schwäbisch Gmünd" ~ "08136",
+      state == "Baden-Württemberg" & constituency_key == "Karlsruhe I" ~ "08212",
+      state == "Baden-Württemberg" & constituency_key %in% c("Bruchsal", "Ettlingen") ~ "08215",
+      state == "Baden-Württemberg" & constituency_key == "Baden-Baden" ~ "08211",
+      state == "Baden-Württemberg" & constituency_key == "Heidelberg" ~ "08221",
+      state == "Baden-Württemberg" & constituency_key %in% c("Mannheim I", "Mannheim II") ~ "08222",
+      state == "Baden-Württemberg" & constituency_key %in% c("Wiesloch", "Weinheim", "Schwetzingen", "Sinsheim") ~ "08226",
+      state == "Baden-Württemberg" & constituency_key == "Neckar-Odenwald" ~ "08225",
+      state == "Baden-Württemberg" & constituency_key == "Calw" ~ "08235",
+      state == "Baden-Württemberg" & constituency_key == "Enz" ~ "08236",
+      state == "Baden-Württemberg" & constituency_key == "Freudenstadt" ~ "08237",
+      state == "Baden-Württemberg" & str_detect(constituency_key, "^Freiburg") ~ "08311",
+      state == "Baden-Württemberg" & constituency_key == "Breisgau" ~ "08315",
+      state == "Baden-Württemberg" & constituency_key == "Emmendingen" ~ "08316",
+      state == "Baden-Württemberg" & constituency_key == "Lahr" ~ "08317",
+      state == "Baden-Württemberg" & constituency_key == "Rottweil" ~ "08325",
+      state == "Baden-Württemberg" & constituency_key == "Villingen-Schwenningen" ~ "08326",
+      state == "Baden-Württemberg" & constituency_key == "Konstanz" ~ "08335",
+      state == "Baden-Württemberg" & constituency_key == "Singen" ~ "08335",
+      state == "Baden-Württemberg" & constituency_key == "Lörrach" ~ "08336",
+      state == "Baden-Württemberg" & constituency_key == "Reutlingen" ~ "08415",
+      state == "Baden-Württemberg" & constituency_key == "Tübingen" ~ "08416",
+      state == "Baden-Württemberg" & constituency_key == "Balingen" ~ "08417",
+      state == "Baden-Württemberg" & constituency_key == "Ulm" ~ "08421",
+      state == "Baden-Württemberg" & constituency_key == "Ravensburg" ~ "08436",
+      state == "Baden-Württemberg" & constituency_key == "Sigmaringen" ~ "08437",
+
+      # =========================
+      # BAYERN
+      # =========================
+      state == "Bayern" & constituency_key == "Mittelfranken Erlangen-Stadt" ~ "09562",
+      state == "Bayern" & str_detect(constituency_key, "Nürnberg") ~ "09564",
+      state == "Bayern" & constituency_key == "Niederbayern Deggendorf" ~ "09271",
+      state == "Bayern" & constituency_key == "Niederbayern Dingolfing" ~ "09279",
+      state == "Bayern" & constituency_key == "Niederbayern Landshut" ~ "09274",
+      state == "Bayern" & constituency_key == "Oberbayern Eichstätt" ~ "09176",
+      state == "Bayern" & constituency_key == "Oberbayern Fürstenfeldbruck-Ost" ~ "09179",
+      state == "Bayern" & constituency_key == "Oberbayern Mühldorf am Inn" ~ "09183",
+      state == "Bayern" & str_detect(constituency_key, "München-Giesing|München-Milbertshofen|München-Pasing|München-Ramersdorf|München-Schwabing") ~ "09162",
+      state == "Bayern" & constituency_key == "Oberbayern München-Land-Süd" ~ "09184",
+      state == "Bayern" & constituency_key == "Oberfranken Bamberg-Stadt" ~ "09461",
+      state == "Bayern" & constituency_key == "Oberfranken Bayreuth" ~ "09462",
+      state == "Bayern" & constituency_key == "Oberfranken Coburg" ~ "09463",
+      state == "Bayern" & constituency_key == "Oberfranken Forchheim" ~ "09474",
+      state == "Bayern" & constituency_key == "Oberfranken Hof" ~ "09464",
+      state == "Bayern" & constituency_key == "Oberpfalz Cham" ~ "09372",
+      state == "Bayern" & constituency_key == "Oberpfalz Neumarkt in der Oberpfalz" ~ "09373",
+      state == "Bayern" & constituency_key == "Oberpfalz Regensburg-Stadt" ~ "09362",
+      state == "Bayern" & constituency_key == "Oberpfalz Tirschenreuth" ~ "09377",
+      state == "Bayern" & constituency_key == "Oberpfalz Weiden in der Oberpfalz" ~ "09363",
+      state == "Bayern" & constituency_key == "Schwaben Aichach-Friedberg" ~ "09771",
+      state == "Bayern" & constituency_key == "Schwaben Neu-Ulm" ~ "09775",
+      state == "Bayern" & constituency_key == "Schwaben, Memmingen" ~ "09764",
+      state == "Bayern" & constituency_key == "Unterfranken Aschaffenburg-Ost" ~ "09661",
+      state == "Bayern" & constituency_key == "Unterfranken Schweinfurt" ~ "09662",
+      state == "Bayern" & constituency_key == "Unterfranken Würzburg-Land" ~ "09679",
+
+      # =========================
+      # BRANDENBURG
+      # =========================
+      state == "Brandenburg" & str_detect(constituency_key, "^Barnim") ~ "12060",
+      state == "Brandenburg" & constituency_key == "Brandenburg an der Havel II" ~ "12051",
+      state == "Brandenburg" & str_detect(constituency_key, "^Cottbus") ~ "12052",
+      state == "Brandenburg" & str_detect(constituency_key, "^Dahme-Spreewald") ~ "12061",
+      state == "Brandenburg" & str_detect(constituency_key, "^Elbe-Elster") ~ "12062",
+      state == "Brandenburg" & constituency_key == "Frankfurt (Oder)" ~ "12053",
+      state == "Brandenburg" & str_detect(constituency_key, "^Havelland") ~ "12063",
+      state == "Brandenburg" & str_detect(constituency_key, "^Märkisch-Oderland") ~ "12064",
+      state == "Brandenburg" & str_detect(constituency_key, "^Oberhavel") ~ "12065",
+      state == "Brandenburg" & constituency_key == "Oberspreewald-Lausitz I" ~ "12066",
+      state == "Brandenburg" & str_detect(constituency_key, "^Oder-Spree") ~ "12067",
+      state == "Brandenburg" & constituency_key == "Ostprignitz-Ruppin I" ~ "12068",
+      state == "Brandenburg" & str_detect(constituency_key, "^Potsdam I|^Potsdam II") ~ "12054",
+      state == "Brandenburg" & str_detect(constituency_key, "^Potsdam-Mittelmark") ~ "12069",
+      state == "Brandenburg" & str_detect(constituency_key, "^Teltow-Fläming") ~ "12072",
+      state == "Brandenburg" & str_detect(constituency_key, "^Uckermark") ~ "12073",
+
+      # =========================
+      # HESSEN
+      # =========================
+      state == "Hessen" & str_detect(constituency_key, "^Bergstraße") ~ "06431",
+      state == "Hessen" & str_detect(constituency_key, "^Darmstadt-Dieburg") ~ "06432",
+      state == "Hessen" & constituency_key == "Darmstadt-Stadt I" ~ "06411",
+      state == "Hessen" & constituency_key == "Eschwege-Witzenhausen" ~ "06636",
+      state == "Hessen" & str_detect(constituency_key, "^Frankfurt am Main") ~ "06412",
+      state == "Hessen" & str_detect(constituency_key, "^Fulda") ~ "06631",
+      state == "Hessen" & str_detect(constituency_key, "^Gießen") ~ "06531",
+      state == "Hessen" & str_detect(constituency_key, "^Groß-Gerau") ~ "06433",
+      state == "Hessen" & str_detect(constituency_key, "^Hochtaunus") ~ "06434",
+      state == "Hessen" & str_detect(constituency_key, "^Kassel-Land") ~ "06633",
+      state == "Hessen" & str_detect(constituency_key, "^Kassel-Stadt") ~ "06611",
+      state == "Hessen" & str_detect(constituency_key, "^Lahn-Dill") ~ "06532",
+      state == "Hessen" & str_detect(constituency_key, "^Limburg-Weilburg") ~ "06533",
+      state == "Hessen" & str_detect(constituency_key, "^Marburg-Biedenkopf") ~ "06534",
+      state == "Hessen" & constituency_key == "Odenwald" ~ "06437",
+      state == "Hessen" & str_detect(constituency_key, "^Offenbach Land") ~ "06438",
+      state == "Hessen" & constituency_key == "Offenbach-Stadt" ~ "06413",
+      state == "Hessen" & str_detect(constituency_key, "^Rheingau-Taunus") ~ "06439",
+      state == "Hessen" & constituency_key == "Rotenburg" ~ "06632",
+      state == "Hessen" & str_detect(constituency_key, "^Schwalm-Eder") ~ "06634",
+      state == "Hessen" & str_detect(constituency_key, "^Waldeck-Frankenberg") ~ "06635",
+      state == "Hessen" & str_detect(constituency_key, "^Wetterau") ~ "06440",
+      state == "Hessen" & str_detect(constituency_key, "^Wiesbaden") ~ "06414",
+
+      # =========================
+      # MECKLENBURG-VORPOMMERN
+      # =========================
+      state == "Mecklenburg-Vorpommern" & str_detect(constituency_key, "Greifswald|Uecker-Randow|Vorpommern-Greifswald") ~ "13075",
+      state == "Mecklenburg-Vorpommern" & str_detect(constituency_key, "Wismar|Nordwestmecklenburg") ~ "13074",
+      state == "Mecklenburg-Vorpommern" & str_detect(constituency_key, "Ludwigslust|Parchim") ~ "13076",
+      state == "Mecklenburg-Vorpommern" & str_detect(constituency_key, "Neubrandenburg|Demmin|Müritz|Mecklenburg-Strelitz|Mecklenburgische Seenplatte") ~ "13071",
+      state == "Mecklenburg-Vorpommern" & str_detect(constituency_key, "Hansestadt Rostock|Rostock") ~ "13003",
+      state == "Mecklenburg-Vorpommern" & str_detect(constituency_key, "Stralsund|Rügen|Vorpommern-Rügen") ~ "13073",
+
+      # =========================
+      # RHEINLAND-PFALZ
+      # =========================
+      state == "Rheinland-Pfalz" & constituency_key == "Alzey" ~ "07331",
+      state == "Rheinland-Pfalz" & constituency_key == "Andernach" ~ "07137",
+      state == "Rheinland-Pfalz" & constituency_key == "Bad Kreuznach" ~ "07133",
+      state == "Rheinland-Pfalz" & constituency_key == "Bad Marienberg (Westerwald)/Westerburg" ~ "07143",
+      state == "Rheinland-Pfalz" & constituency_key == "Bad Neuenahr-Ahrweiler" ~ "07131",
+      state == "Rheinland-Pfalz" & constituency_key == "Bendorf/Weißenthurm" ~ "07137",
+      state == "Rheinland-Pfalz" & constituency_key == "Betzdorf/Kirchen (Sieg)" ~ "07132",
+      state == "Rheinland-Pfalz" & constituency_key == "Donnersberg" ~ "07333",
+      state == "Rheinland-Pfalz" & constituency_key == "Frankenthal (Pfalz)" ~ "07311",
+      state == "Rheinland-Pfalz" & constituency_key == "Kaiserslautern I" ~ "07312",
+      state == "Rheinland-Pfalz" & constituency_key == "Kaiserslautern II" ~ "07335",
+      state == "Rheinland-Pfalz" & constituency_key == "Kirn/Bad Sobernheim" ~ "07133",
+      state == "Rheinland-Pfalz" & constituency_key == "Kusel" ~ "07336",
+      state == "Rheinland-Pfalz" & constituency_key == "Linz am Rhein/Rengsdorf" ~ "07138",
+      state == "Rheinland-Pfalz" & str_detect(constituency_key, "^Mainz") ~ "07315",
+      state == "Rheinland-Pfalz" & constituency_key == "Mayen" ~ "07137",
+      state == "Rheinland-Pfalz" & constituency_key == "Montabaur" ~ "07143",
+      state == "Rheinland-Pfalz" & constituency_key == "Mutterstadt" ~ "07338",
+      state == "Rheinland-Pfalz" & constituency_key == "Neustadt an der Weinstraße" ~ "07316",
+      state == "Rheinland-Pfalz" & constituency_key == "Pirmasens" ~ "07317",
+      state == "Rheinland-Pfalz" & constituency_key == "Remagen/Sinzig" ~ "07131",
+      state == "Rheinland-Pfalz" & constituency_key == "Rhein-Hunsrück" ~ "07140",
+      state == "Rheinland-Pfalz" & constituency_key == "Speyer" ~ "07318",
+      state == "Rheinland-Pfalz" & constituency_key == "Südliche Weinstraße" ~ "07337",
+      state == "Rheinland-Pfalz" & constituency_key == "Trier" ~ "07211",
+      state == "Rheinland-Pfalz" & constituency_key == "Vulkaneifel" ~ "07233",
+      state == "Rheinland-Pfalz" & constituency_key == "Wittlich" ~ "07231",
+      state == "Rheinland-Pfalz" & constituency_key == "Zweibrücken" ~ "07320",
+
+      # =========================
+      # SAARLAND
+      # =========================
+      state == "Saarland" & constituency_key == "Neunkirchen" ~ "10043",
+      state == "Saarland" & constituency_key == "Saarbrücken" ~ "10041",
+      state == "Saarland" & constituency_key == "Saarlouis" ~ "10044",
+
+      # =========================
+      # SACHSEN-ANHALT
+      # =========================
+      state == "Sachsen-Anhalt" & constituency_key == "Salzwedel" ~ "15081",
+      state == "Sachsen-Anhalt" & constituency_key %in% c("Havelberg-Osterburg", "Havelberg-Osterburg") ~ "15090",
+      state == "Sachsen-Anhalt" & constituency_key %in% c("Genthin", "Burg") ~ "15086",
+      state == "Sachsen-Anhalt" & constituency_key %in% c("Wolmirstedt", "Oschersleben", "Wanzleben") ~ "15083",
+      state == "Sachsen-Anhalt" & str_detect(constituency_key, "^Magdeburg") ~ "15003",
+      state == "Sachsen-Anhalt" & constituency_key %in% c("Halberstadt", "Blankenburg", "Wernigerode", "Quedlinburg") ~ "15085",
+      state == "Sachsen-Anhalt" & constituency_key %in% c("Staßfurt", "Aschersleben", "Schönebeck", "Bernburg") ~ "15089",
+      state == "Sachsen-Anhalt" & constituency_key %in% c("Köthen", "Bitterfeld-Wolfen", "Wolfen") ~ "15082",
+      state == "Sachsen-Anhalt" & constituency_key %in% c("Wittenberg", "Jessen") ~ "15091",
+      state == "Sachsen-Anhalt" & str_detect(constituency_key, "^Dessau-Roßlau$") ~ "15001",
+      state == "Sachsen-Anhalt" & constituency_key %in% c("Sangerhausen", "Eisleben") ~ "15087",
+      state == "Sachsen-Anhalt" & constituency_key %in% c("Saalekreis", "Bad Dürrenberg-Saalekreis", "Merseburg", "Querfurt") ~ "15088",
+      state == "Sachsen-Anhalt" & str_detect(constituency_key, "^Halle") ~ "15002",
+      state == "Sachsen-Anhalt" & constituency_key %in% c("Zeitz", "Nebra") ~ "15084",
+
+      # =========================
+      # SCHLESWIG-HOLSTEIN
+      # =========================
+      state == "Schleswig-Holstein" & constituency_key == "Dithmarschen-Süd" ~ "01051",
+      state == "Schleswig-Holstein" & constituency_key == "Eckernförde" ~ "01058",
+      state == "Schleswig-Holstein" & constituency_key == "Flensburg" ~ "01001",
+      state == "Schleswig-Holstein" & constituency_key == "Flensburg-Land" ~ "01059",
+      state == "Schleswig-Holstein" & constituency_key == "Kiel-Ost" ~ "01002",
+      state == "Schleswig-Holstein" & constituency_key == "Lauenburg-Nord" ~ "01053",
+      state == "Schleswig-Holstein" & constituency_key == "Lübeck-Süd" ~ "01003",
+      state == "Schleswig-Holstein" & constituency_key == "Neumünster" ~ "01004",
+      state == "Schleswig-Holstein" & constituency_key == "Nordfriesland-Nord" ~ "01054",
+      state == "Schleswig-Holstein" & str_detect(constituency_key, "^Pinneberg") ~ "01056",
+      state == "Schleswig-Holstein" & constituency_key == "Plön-Nord" ~ "01057",
+      state == "Schleswig-Holstein" & constituency_key == "Rendsburg" ~ "01058",
+      state == "Schleswig-Holstein" & constituency_key == "Segeberg-Ost" ~ "01060",
+      state == "Schleswig-Holstein" & str_detect(constituency_key, "^Steinburg") ~ "01061",
+      state == "Schleswig-Holstein" & str_detect(constituency_key, "^Stormarn") ~ "01062",
+
+      # =========================
+      # THUERINGEN
+      # =========================
+      state == "Thüringen" & str_detect(constituency_key, "^Eichsfeld") ~ "16061",
+      state == "Thüringen" & str_detect(constituency_key, "^Erfurt") ~ "16051",
+      state == "Thüringen" & str_detect(constituency_key, "^Gera") ~ "16052",
+      state == "Thüringen" & constituency_key == "Gotha II" ~ "16067",
+      state == "Thüringen" & constituency_key == "Greiz I" ~ "16076",
+      state == "Thüringen" & str_detect(constituency_key, "^Ilm-Kreis") ~ "16070",
+      state == "Thüringen" & str_detect(constituency_key, "^Jena") ~ "16053",
+      state == "Thüringen" & str_detect(constituency_key, "^Kyffhäuserkreis") ~ "16065",
+      state == "Thüringen" & str_detect(constituency_key, "^Nordhausen") ~ "16062",
+      state == "Thüringen" & str_detect(constituency_key, "^Saale-Holzland-Kreis") ~ "16074",
+      state == "Thüringen" & str_detect(constituency_key, "^Saale-Orla-Kreis") ~ "16075",
+      state == "Thüringen" & str_detect(constituency_key, "^Saalfeld-Rudolstadt") ~ "16073",
+      state == "Thüringen" & constituency_key == "Schmalkalden-Meiningen II" ~ "16066",
+      state == "Thüringen" & constituency_key == "Sonneberg I" ~ "16072",
+      state == "Thüringen" & constituency_key == "Sömmerda II" ~ "16068",
+      state == "Thüringen" & str_detect(constituency_key, "^Unstrut-Hainich-Kreis") ~ "16064",
+
+      TRUE ~ NA_character_
+    ),
+
+    match_quality = case_when(
+
+      # non geographic
+      constituency_key == "" ~ "missing",
+      constituency_key == "Landesliste" ~ "non_geographic",
+      state == "Bremen" & constituency_key == "" ~ "missing",
+
+      # city-state handling
+      state == "Berlin" ~ "state_level",
+      state == "Hamburg" & constituency_key != "" ~ "state_level",
+      state == "Bremen" & constituency_key %in% c("Bremen Listenwahl", "Bremen Personenwahl", "Bremen, Personenwahl", "Bremerhaven Listenwahl") ~ "exact",
+
+      # explicit ambiguous multi-kreis
+      state == "Baden-Württemberg" & constituency_key %in% c("Hechingen-Münsingen", "Tuttlingen-Donaueschingen") ~ "ambiguous_multi",
+      state == "Bayern" & constituency_key %in% c(
+        "Niederbayern", "Niederbayern Regen Freyung-Grafenau",
+        "Mittelfranken Neustadt an der Aisch-Bad Windsheim Fürth-Land",
+        "Oberfranken Wunsiedel Kulmbach",
+        "Schwaben Kempten Oberallgäu",
+        "Schwaben Lindau Sonthofen",
+        "Schwaben Lindau-Sonthofen"
+      ) ~ "ambiguous_multi",
+      state == "Brandenburg" & constituency_key %in% c(
+        "Märkisch-Oderland I/Oder-Spree IV",
+        "Oberspreewald-Lausitz II/Spree-Neiße IV",
+        "Oberspreewald-Lausitz III/Spree-Neiße III",
+        "Ostprignitz-Ruppin III / Havelland III",
+        "Prignitz II/Ostprignitz-Ruppin II",
+        "Uckermark III / Oberhavel IV"
+      ) ~ "ambiguous_multi",
+      state == "Rheinland-Pfalz" & constituency_key %in% c(
+        "Bernkastel-Kues/Morbach/Kirchberg (Hunsrück)",
+        "Koblenz/Lahnstein"
+      ) ~ "ambiguous_multi",
+      state == "Sachsen-Anhalt" & constituency_key == "Dessau-Roßlau-Wittenberg" ~ "ambiguous_multi",
+      state == "Schleswig-Holstein" & constituency_key %in% c("Dithmarschen-Schleswig", "Plön-Ostholstein") ~ "ambiguous_multi",
+      state == "Thüringen" & constituency_key %in% c(
+        "Hildburghausen I – Schmalkalden-Meiningen III",
+        "Suhl - Schmalkalden-Meiningen III",
+        "Suhl – Schmalkalden-Meiningen IV",
+        "Sömmerda I – Gotha III",
+        "Wartburgkreis II – Eisenach",
+        "Weimar I – Weimarer Land II",
+        "Weimarer Land I – Saalfeld-Rudolstadt III"
+      ) ~ "ambiguous_multi",
+
+      # exact one-kreis/city name matches
+      state == "Baden-Württemberg" & constituency_key %in% c(
+        "Böblingen", "Esslingen", "Göppingen", "Ludwigsburg", "Heidenheim",
+        "Baden-Baden", "Heidelberg", "Neckar-Odenwald", "Calw", "Enz",
+        "Freudenstadt", "Emmendingen", "Rottweil", "Konstanz", "Lörrach",
+        "Reutlingen", "Tübingen", "Ulm", "Ravensburg", "Sigmaringen"
+      ) ~ "exact",
+
+      state == "Bayern" & constituency_key %in% c(
+        "Mittelfranken Erlangen-Stadt", "Niederbayern Deggendorf",
+        "Oberbayern Eichstätt", "Oberbayern Mühldorf am Inn",
+        "Oberfranken Forchheim", "Oberpfalz Cham",
+        "Oberpfalz Neumarkt in der Oberpfalz", "Oberpfalz Regensburg-Stadt",
+        "Oberpfalz Tirschenreuth", "Oberpfalz Weiden in der Oberpfalz",
+        "Schwaben Aichach-Friedberg", "Schwaben Neu-Ulm",
+        "Schwaben, Memmingen", "Unterfranken Würzburg-Land"
+      ) ~ "exact",
+
+      state == "Brandenburg" & constituency_key %in% c(
+        "Frankfurt (Oder)"
+      ) ~ "exact",
+
+      state == "Hessen" & constituency_key %in% c(
+        "Odenwald", "Offenbach-Stadt"
+      ) ~ "exact",
+
+      state == "Rheinland-Pfalz" & constituency_key %in% c(
+        "Bad Kreuznach", "Donnersberg", "Frankenthal (Pfalz)", "Kusel",
+        "Neustadt an der Weinstraße", "Pirmasens", "Speyer",
+        "Südliche Weinstraße", "Trier", "Vulkaneifel", "Zweibrücken"
+      ) ~ "exact",
+
+      state == "Saarland" & constituency_key %in% c(
+        "Neunkirchen", "Saarbrücken", "Saarlouis"
+      ) ~ "exact",
+
+      state == "Sachsen-Anhalt" & constituency_key %in% c(
+        "Salzwedel", "Dessau-Roßlau", "Saalekreis"
+      ) ~ "exact",
+
+      state == "Schleswig-Holstein" & constituency_key %in% c(
+        "Flensburg", "Neumünster"
+      ) ~ "exact",
+
+      # everything else with a usable kreis_name
+      !is.na(kreis_name) ~ "approx",
+
+      TRUE ~ NA_character_
+    )
+  )
+```
+
+```{r}
+constituency_to_kreis %>%
+  filter(is.na(kreis_name) | is.na(match_quality)) %>%
+  select(state, Constituency, constituency_key) %>%
+  arrange(state, constituency_key)
+```
+
+```{r}
+iv_panel <- read.csv("/Users/diananichvoloda/Desktop/iv_total_new.csv")
+```
+
+# Merge Together
+
+```{r}
+library(readr)
+library(dplyr)
+library(stringr)
+library(purrr)
+library(lubridate)
+
+samples_dir <- "/Users/diananichvoloda/Library/CloudStorage/GoogleDrive-diananichvoloda@college.harvard.edu/My Drive/2025-2026/Econ 1425/PAPER/DATA/Text Data/Samples"
+
+sample_files <- list.files(
+  path = samples_dir,
+  pattern = "_sample\\.csv$",
+  full.names = TRUE
+)
+
+all_samples <- map_dfr(sample_files, function(f) {
+  df <- read_csv(
+    f,
+    show_col_types = FALSE,
+    col_types = cols(
+      ags = col_character(),
+      state = col_character(),
+      district = col_character(),
+      Party = col_character(),
+      Constituency = col_character(),
+      constituency_key = col_character(),
+      Speech = col_character()
+    )
+  )
+  
+  df %>%
+    mutate(
+      source_file = basename(f),
+      ags = str_pad(as.character(ags), width = 5, side = "left", pad = "0")
+    )
+})
+
+all_samples <- all_samples %>%
+  mutate(
+    Date = as.Date(Date),
+    year = year(Date),
+    month = month(Date),
+    ym = format(Date, "%Y-%m")
+  )
+
+print(dim(all_samples))
+print(names(all_samples))
+print(table(all_samples$state, useNA = "ifany"))
+
+write_csv(
+  all_samples,
+  file.path(samples_dir, "all_state_samples_stacked.csv")
+)
+```
+
+```{r}
+# Importing scored samples
+
+Final_scored <- read.csv("/Users/diananichvoloda/Library/CloudStorage/GoogleDrive-diananichvoloda@college.harvard.edu/My Drive/2025-2026/Econ 1425/PAPER/DATA/Text Data/Samples/all_state_samples_scored.csv")
+
+library(dplyr)
+library(stringr)
+
+Final_clean <- Final_scored %>%
+  
+  # Step 1: identify base column names
+  {
+    df <- .
+    
+    base_names <- unique(str_remove(names(df), "_x$|_y$"))
+    
+    # Step 2: loop over base names and coalesce
+    for (nm in base_names) {
+      x_col <- paste0(nm, "_x")
+      y_col <- paste0(nm, "_y")
+      
+      if (x_col %in% names(df) & y_col %in% names(df)) {
+        df[[nm]] <- dplyr::coalesce(df[[x_col]], df[[y_col]])
+      } else if (x_col %in% names(df)) {
+        df[[nm]] <- df[[x_col]]
+      } else if (y_col %in% names(df)) {
+        df[[nm]] <- df[[y_col]]
+      }
+    }
+    
+    df
+  } %>%
+  
+  # Step 3: drop all *_x and *_y columns
+  select(-matches("_x$|_y$"))
+
+```
+
+```{r}
+Final_clean <- Final_clean %>%
+  mutate(
+    year = as.integer(year),
+    election_year = case_when(
+      year <= 2013 ~ 2013,
+      year <= 2017 ~ 2017,
+      year <= 2021 ~ 2021,
+      year <= 2025 ~ 2025,
+      TRUE ~ NA_real_
+    )
+  )
+
+
+
+panel_ags_election <- Final_clean %>%
+  group_by(ags, election_year) %>%
+  summarise(
+    n_speeches = n(),
+    mean_anti_immigration = mean(anti_immigration_sentiment, na.rm = TRUE),
+    share_nonzero = mean(anti_immigration_sentiment > 0, na.rm = TRUE),
+    .groups = "drop"
+  )
+```
+
+Filter for Immigration-related speeches
+
+```{r}
+keywords <- c(
+  # Core migration terms
+  "migration", "migrant", "immigra", "einwander", "zuwander",
+  
+  # Refugees / asylum
+  "flücht", "asyl", "schutzsuch", "vertrieb", "umsiedl",
+  
+  # Legal status / policy
+  "aufenthalt", "visa", "visum", "aufnahm", "abschieb", "duld",
+  "einbürger", "staatsbürg",
+  
+  # Borders / control
+  "grenz", "grenze", "grenzschutz", "kontroll",
+  
+  # Integration / society
+  "integration", "integrations", "teilhabe", "parallelgesellschaft",
+  "leitkultur", "multikulti",
+  
+  # Labor / economic migration
+  "fachkräft", "arbeitskräft", "zuwanderungsgesetz",
+  
+  # Irregular migration / enforcement
+  "illegal", "irregul", "schleus", "abschieb", "rückführ",
+  
+  # Crisis framing (very relevant in Germany)
+  "flüchtlingskrise", "migrationskrise", "asylpolitik",
+  
+  # Regions often used as proxies
+  "syr", "ukrain", "afghan", "irak", "afrika",
+  
+  # EU / external dimension
+  "dublin", "frontex", "schengen",
+  
+  # General foreigner terms
+  "ausländer", "ausländ", "nichtdeutsch"
+)
+
+library(stringr)
+
+Final_clean_immigration <- Final_clean %>%
+  mutate(
+    mentions_immigration = str_detect(
+      tolower(Speech),
+      str_c(keywords, collapse = "|")
+    )
+  )
+
+immigration_speeches <- Final_clean_immigration %>%
+  filter(mentions_immigration == TRUE)
+```
+
+Aggregate
+
+```{r}
+
+
+state_agg <- immigration_speeches %>%
+  group_by(state, election_year) %>%
+  summarise(
+    mean_sentiment = mean(anti_immigration_sentiment, na.rm = TRUE),
+    median_sentiment = median(anti_immigration_sentiment, na.rm = TRUE),
+    sd_sentiment = sd(anti_immigration_sentiment, na.rm = TRUE),
+    n_speeches = n()
+  )
+```
+
+Merging with IV panel
+
+```{r}
+IV <- read.csv("/Users/diananichvoloda/Desktop/iv_total_new.csv")
+
+IV_clean <- IV %>%
+  mutate(
+    AGS = str_pad(as.character(AGS), 5, pad = "0"),
+    year = as.integer(year)
+  )
+
+panel_ags_election <- panel_ags_election %>%
+  mutate(
+    ags = str_pad(as.character(ags), 5, pad = "0"),
+    election_year = as.integer(election_year)
+  )
+
+IV_merged <- IV_clean %>%
+  left_join(
+    panel_ags_election,
+    by = c("AGS" = "ags", "year" = "election_year")
+  )
+```
+
+# New Merge with IV
+
+```{r}
+IV <- read.csv("/Users/diananichvoloda/Desktop/iv_total_new.csv") 
+
+library(dplyr)
+
+state_year_agg <- IV %>%
+  group_by(state, year) %>%
+  summarise(
+    counties_n = n(),
+
+    afd = weighted.mean(afd, w = valid_votes, na.rm = TRUE),
+    far_right = weighted.mean(far_right, w = valid_votes, na.rm = TRUE),
+
+    eligible_voters = sum(eligible_voters, na.rm = TRUE),
+    number_voters   = sum(number_voters, na.rm = TRUE),
+    valid_votes_sum = sum(valid_votes, na.rm = TRUE),
+
+    syria_net_4yr   = sum(syria_net_4yr, na.rm = TRUE),
+    ukraine_net_4yr = sum(ukraine_net_4yr, na.rm = TRUE),
+
+    turnout = number_voters / eligible_voters,
+
+    .groups = "drop"
+  ) %>%
+  rename(valid_votes = valid_votes_sum)
+```
+
+# New Merge
+
+```{r}
+state_year_agg <- state_year_agg %>%
+  rename(election_year = year)
+state_lookup <- tibble::tribble(
+  ~state, ~state_name,
+  1, "Schleswig-Holstein",
+  2, "Hamburg",
+  3, "Niedersachsen",
+  4, "Bremen",
+  5, "Nordrhein-Westfalen",
+  6, "Hessen",
+  7, "Rheinland-Pfalz",
+  8, "Baden-Württemberg",
+  9, "Bayern",
+  10, "Saarland",
+  11, "Berlin",
+  12, "Brandenburg",
+  13, "Mecklenburg-Vorpommern",
+  14, "Sachsen",
+  15, "Sachsen-Anhalt",
+  16, "Thüringen"
+)
+
+state_year_agg <- state_year_agg %>%
+  left_join(state_lookup, by = "state") %>%
+  mutate(state = state_name) %>%
+  select(-state_name)
+
+state_year_full <- state_year_agg %>%
+  left_join(state_agg, by = c("state", "election_year"))
+
+state_year_full <- state_year_full %>%
+  mutate(
+    ukraine_per_voter = ukraine_net_4yr / eligible_voters,
+    syria_per_voter   = syria_net_4yr / eligible_voters
+  )
+```
+
+Regression at the state level
+
+```{r}
+model_state <- feols(
+  mean_sentiment ~ syria_per_voter + ukraine_per_voter |
+  state + election_year,
+  data = state_year_full,
+  cluster = ~state
+)
+
+summary(model2) 
+```
+
+Diagnostic
+
+```{r}
+unmatched <- IV_clean %>%
+  anti_join(
+    panel_clean,
+    by = c("AGS" = "ags", "year" = "election_year")
+  )
+
+unmatched %>%
+  count(year, sort = TRUE)
+
+unmatched %>%
+  select(AGS, year) %>%
+  distinct() %>%
+  print(n = 100)
+```
+
+```{r}
+Final_clean %>%
+  count(ags, election_year) %>%
+  nrow()
+nrow(panel_ags_election)
+
+mean(is.na(IV_merged$mean_anti_immigration))
+
+IV_observed <- IV_merged %>%
+  filter(!is.na(mean_anti_immigration))
+```
+
+Regressions
+
+```{r}
+model1 <- lm(
+  mean_anti_immigration ~ syria_per_voter + ukraine_per_voter,
+  data = IV_merged
+)
+
+summary(model1)
+```
+
+```{r}
+model2 <- feols(
+  mean_anti_immigration ~ syria_per_voter + ukraine_per_voter |
+  AGS + year,
+  data = IV_merged,
+  cluster = ~AGS
+)
+
+summary(model2) 
+```
+
+```{r}
+model3 <- feols(
+  mean_anti_immigration ~ syria_per_voter + ukraine_per_voter |
+  AGS + year,
+  weights = ~n_speeches,
+  data = IV_merged,
+  cluster = ~AGS
+)
+
+summary(model3)
+```
+
+```{r}
+model4 <- feols(
+  share_nonzero ~ syria_per_voter + ukraine_per_voter |
+  AGS + year,
+  weights = ~n_speeches,
+  cluster = ~AGS,
+  data = IV_merged
+)
+
+summary(model4)
+```
+
+# IV Estimates
+
+Ukraine
+
+```{r}
+# ---- First stage regression ----
+fs_ukraine <- feols(
+  ukraine_per_voter ~ z_ukraine_per_voter | AGS + year,
+  cluster = ~AGS,
+  data = IV_merged
+)
+
+summary(fs_ukraine)
+
+f_test <- wald(fs_ukraine, "z_ukraine_per_voter")
+print(f_test)
+f_stat <- f_test$stat
+f_stat
+
+
+iv_ukraine <- feols(
+  mean_anti_immigration ~ 1 | AGS + year |
+  ukraine_per_voter ~ z_ukraine_per_voter,
+  cluster = ~AGS,
+  data = IV_merged
+)
+
+summary(iv_ukraine)
+```
+
+Syria
+
+```{r}
+# ---- First stage regression ----
+fs_syria <- feols(
+  syria_per_voter ~ z_syria_2008_per_voter | AGS + year,
+  cluster = ~AGS,
+  data = IV_merged
+)
+
+summary(fs_syria)
+
+f_test <- wald(fs_syria, "z_syria_2008_per_voter")
+print(f_test)
+f_stat <- f_test$stat
+f_stat
+
+iv_syria <- feols(
+  mean_anti_immigration ~ 1 | AGS + year | syria_per_voter ~ z_syria_2008_per_voter,
+  cluster = ~AGS,
+  data = IV_merged
+)
+
+summary(iv_syria)
+```
+
+With AfD
+
+```{r}
+ols_interaction_w <- feols(
+  afd ~ mean_anti_immigration  ,
+  weights = ~n_speeches,
+  cluster = ~AGS,
+  data = IV_merged %>% filter(n_speeches>5)
+)
+
+summary(ols_interaction_w)
+```
+
+```{r}
+ols_interaction_w1 <- feols(
+  afd ~ syria_per_voter * mean_anti_immigration | AGS + year,
+  weights = ~n_speeches,
+  cluster = ~AGS,
+  data = IV_merged
+)
+
+summary(ols_interaction_w1)
+```

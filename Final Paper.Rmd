@@ -1,0 +1,2885 @@
+---
+title: "Final Project"
+author: "Diana Nichvoloda"
+output:
+  pdf_document:
+    latex_engine: xelatex
+---
+
+```{r echo=FALSE, message=FALSE, warning=FALSE, include=TRUE}
+library(dplyr)
+library(tidyverse)
+library(kableExtra)
+library(lmtest)
+library(ggplot2)
+library(fixest)
+library(lfe)
+#rm(list=ls())
+options(tibble.width = Inf)
+options(width = 200)
+```
+
+```{r preliminaries, echo=FALSE}
+rm(list=ls()) #clean out memory 
+```
+
+# Federal Election data - municipal level (2013, 2017, 2021, 2025)
+
+```{r}
+library(readr)
+library(haven)
+
+fed_muni <- readRDS("/Users/diananichvoloda/Library/CloudStorage/GoogleDrive-diananichvoloda@college.harvard.edu/My Drive/2025-2026/Econ 1425/PAPER/DATA/federal_muni_harm_25.rds")
+
+years_keep <- c(2013, 2017, 2021, 2025)
+
+fed_muni <- fed_muni %>%
+  filter(election_year %in% years_keep)
+
+#Renaming
+fed_muni <- fed_muni %>%
+  rename(
+    municipality = ags,
+    year = election_year,
+  )
+
+#Getting rid of excess columns 
+fed_muni <- fed_muni %>%
+  select(
+    -unique_mailin,
+    -unique_multi_mailin,
+    -eligible_voters_orig, 
+    -number_voters_orig,
+    -invalid_votes, 
+    -voters_wo_blockingnotice,
+    -voters_blockingnotice,
+    -voters_par25_2,
+    -blocked_voters_orig,
+    -voters_w_ballot, 
+    -turnout_wo_mailin,
+    -pop_weight,
+    -area_weight,
+    -blocked_weight,
+    -voters_weight
+  )
+
+# --- 1) Define which parties you want to KEEP (main parties + outcome) ---
+keep_parties <- c(
+  "afd",
+  "cdu", "csu", "spd", "gruene", "fdp",
+  "linke_pds"   # or whatever your Left-party column is named
+)
+
+# --- 2) Define which parties should count toward "far_right" (if they exist) ---
+far_right_parts <- c("afd", "npd", "rep", "die_rechte", "dvu", "iii_weg")
+
+# --- 3) Clean: keep only needed non-party vars + the party vars above ---
+# (adjust these non-party vars to match your dataset)
+keep_nonparty <- c(
+  "municipality", "county", "state", "year",
+  "eligible_voters", "number_voters", "valid_votes", "turnout"
+)
+
+fed_muni_clean <- fed_muni %>%
+  # keep only columns that exist in your data
+  select(any_of(c(keep_nonparty, keep_parties, far_right_parts))) %>%
+  # ensure party shares are numeric
+  mutate(across(any_of(unique(c(keep_parties, far_right_parts))), as.numeric)) %>%
+  # create far_right (row-wise sum across whatever far-right columns exist)
+  rowwise() %>%
+  mutate(
+    far_right = sum(c_across(any_of(far_right_parts)), na.rm = TRUE)
+  ) %>%
+  ungroup() 
+
+fed_muni_clean <- fed_muni_clean %>%
+  mutate(union = cdu + csu)
+fed_muni_clean <- fed_muni_clean %>%
+  select(-csu)
+
+fed_muni_clean <- fed_muni_clean %>%
+    # OPTIONAL: drop the micro far-right components after constructing far_right
+  # (keeps afd + far_right + major parties)
+  select(-any_of(setdiff(far_right_parts, "afd")))
+
+# fed_muni_clean now contains:
+# key vars + turnout/votes + {afd, cdu, csu, spd, gruene, fdp, linke_pds} + far_right
+
+#Aggregating by county
+
+share_vars <- c("afd","cdu","spd","gruene","fdp","linke_pds","far_right","union")
+
+fed_county <- fed_muni_clean %>%
+  filter(!is.na(valid_votes), valid_votes > 0) %>%
+  mutate(across(all_of(share_vars), ~ .x * valid_votes, .names = "{.col}_votes")) %>%
+  group_by(county, state, year) %>%
+  summarise(
+    eligible_voters = sum(eligible_voters, na.rm = TRUE),
+    number_voters   = sum(number_voters,   na.rm = TRUE),
+    valid_votes     = sum(valid_votes,     na.rm = TRUE),
+    across(ends_with("_votes"), ~ sum(.x, na.rm = TRUE)),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    turnout = number_voters / eligible_voters,
+    across(ends_with("_votes"), ~ .x / valid_votes,
+           .names = "{sub('_votes$', '', .col)}")
+  ) %>%
+  select(county, state, year, eligible_voters, number_voters, valid_votes, turnout,
+         all_of(share_vars))
+```
+
+```{r}
+#install.packages("gerda")
+library(gerda)
+codebook <- gerda_covariates_codebook()
+print(codebook)
+```
+
+Data on 2013, 2017, 2021, and 2025 federal elections by municipality
+
+# Parliamentary Elections
+
+2024
+
+```{r}
+library(readr)
+library(dplyr)
+
+EU_Parliamentary2024 <- read_delim(
+  "/Users/diananichvoloda/Library/CloudStorage/GoogleDrive-diananichvoloda@college.harvard.edu/My Drive/2025-2026/Econ 1425/PAPER/DATA/EU Parliament by district2024.csv",
+  delim = ";",
+  locale = locale(encoding = "UTF-8"),
+  skip = 9,
+  show_col_types = FALSE
+)
+
+EU_Parliamentary2024 <- EU_Parliamentary2024 %>%
+  rename(
+    election_type        = Wahlart,
+    election_date        = Wahltag,
+    region_type          = Gebietsart,
+    region_code          = Gebietsnummer,
+    region_name          = Gebietsname,
+    higher_region_type   = UegGebietsart,
+    higher_region_code   = UegGebietsnummer,
+    group_type           = Gruppenart,
+    party                = Gruppenname,
+    group_order          = Gruppenreihenfolge,
+    vote_type            = Stimme,
+    votes                = Anzahl,
+    vote_share_percent   = Prozent,
+    prev_votes           = VorpAnzahl,
+    prev_vote_share      = VorpProzent,
+    diff_percent         = DiffProzent,
+    diff_percentage_pts  = DiffProzentPkt,
+    notes                = Bemerkung
+  )
+
+ep_afd_2024 <- EU_Parliamentary2024 %>%
+  filter(
+    region_type == "Kreis",
+    group_type == "Partei",
+    party == "AfD",
+    vote_type == 1
+  ) %>%
+  mutate(
+    vote_share_percent = as.numeric(gsub(",", ".", vote_share_percent)),
+    afd_share = vote_share_percent / 100,
+    year = 2024L,
+    ags = as.character(region_code)
+  ) %>%
+  select(ags, year, afd_share)
+
+ep_eligible_2024 <- EU_Parliamentary2024 %>%
+  filter(
+    region_type == "Kreis",
+    group_type == "System-Gruppe",
+    party == "Wahlberechtigte"
+  ) %>%
+  mutate(
+    eligible_voters = as.numeric(gsub(",", ".", votes)),
+    ags = as.character(region_code),
+    year = 2024L
+  ) %>%
+  select(ags, year, eligible_voters)
+
+ep_panel_2024 <- ep_afd_2024 %>%
+  left_join(ep_eligible_2024, by = c("ags", "year"))
+```
+
+2019
+
+```{r}
+EU_Parliamentary2019 <- read_delim(
+  "/Users/diananichvoloda/Library/CloudStorage/GoogleDrive-diananichvoloda@college.harvard.edu/My Drive/2025-2026/Econ 1425/PAPER/DATA/EU_parliamentary/ew2019_kerg2.csv",
+  delim = ";",
+  locale = locale(encoding = "UTF-8"),
+  skip = 9,
+  show_col_types = FALSE
+)
+
+EU_Parliamentary2019 <- EU_Parliamentary2019 %>%
+  rename(
+    election_type        = Wahlart,
+    election_date        = Wahltag,
+    region_type          = Gebietsart,
+    region_code          = Gebietsnummer,
+    region_name          = Gebietsname,
+    higher_region_type   = UegGebietsart,
+    higher_region_code   = UegGebietsnummer,
+    group_type           = Gruppenart,
+    party                = Gruppenname,
+    group_order          = Gruppenreihenfolge,
+    vote_type            = Stimme,
+    votes                = Anzahl,
+    vote_share_percent   = Prozent,
+    prev_votes           = VorpAnzahl,
+    prev_vote_share      = VorpProzent,
+    diff_percent         = DiffProzent,
+    diff_percentage_pts  = DiffProzentPkt,
+    notes                = Bemerkung
+  )
+
+ep_afd_2019 <- EU_Parliamentary2019 %>%
+  filter(
+    region_type == "Kreis",
+    group_type == "Partei",
+    party == "AfD",
+    vote_type == 1
+  ) %>%
+  mutate(
+    vote_share_percent = as.numeric(gsub(",", ".", vote_share_percent)),
+    afd_share = vote_share_percent / 100,
+    year = 2019L,
+    ags = as.character(region_code)
+  ) %>%
+  select(ags, year, afd_share)
+
+ep_eligible_2019 <- EU_Parliamentary2019 %>%
+  filter(
+    region_type == "Kreis",
+    group_type == "System-Gruppe",
+    party == "Wahlberechtigte"
+  ) %>%
+  mutate(
+    eligible_voters = as.numeric(gsub(",", ".", votes)),
+    ags = as.character(region_code),
+    year = 2019L
+  ) %>%
+  select(ags, year, eligible_voters)
+
+ep_panel_2019 <- ep_afd_2019 %>%
+  left_join(ep_eligible_2019, by = c("ags", "year"))
+```
+
+2014
+
+```{r}
+EU_Parliamentary2014_raw <- read_delim(
+  "/Users/diananichvoloda/Library/CloudStorage/GoogleDrive-diananichvoloda@college.harvard.edu/My Drive/2025-2026/Econ 1425/PAPER/DATA/EU_parliamentary/ew2014_kerg.csv",
+  delim = ";",
+  locale = locale(encoding = "Latin1"),
+  skip = 5,
+  col_names = FALSE,
+  show_col_types = FALSE,
+  trim_ws = TRUE
+)
+
+header1 <- as.character(EU_Parliamentary2014_raw[1, ])
+header2 <- as.character(EU_Parliamentary2014_raw[2, ])
+
+header1[is.na(header1)] <- ""
+header2[is.na(header2)] <- ""
+
+col_names <- ifelse(
+  header1 == "",
+  header2,
+  ifelse(
+    header2 == "",
+    header1,
+    paste(header1, header2, sep = "_")
+  )
+)
+
+col_names <- col_names %>%
+  str_replace_all("[[:space:]]+", "_") %>%
+  str_replace_all("[^[:alnum:]_]", "") %>%
+  str_to_lower()
+
+col_names[col_names == ""] <- paste0("x", which(col_names == ""))
+
+EU_Parliamentary2014 <- EU_Parliamentary2014_raw[-c(1, 2), ]
+names(EU_Parliamentary2014) <- make.unique(col_names)
+
+EU_Parliamentary2014 <- EU_Parliamentary2014 %>%
+  mutate(across(everything(), ~ type.convert(as.character(.x), as.is = TRUE)))
+
+names(EU_Parliamentary2014)
+
+ep_afd_2014 <- EU_Parliamentary2014 %>%
+  transmute(
+    ags = str_pad(as.character(nr), width = 5, side = "left", pad = "0"),
+    region_name = gebiet,
+    higher_region = `gehört_zu`,
+    year = 2014,
+    eligible_voters = as.numeric(`wahlberechtigte_endgültig`),
+    valid_votes = as.numeric(`gültige_endgültig`),
+    afd_votes = as.numeric(`afd_endgültig`),
+    afd_share = afd_votes / valid_votes
+  ) %>%
+  filter(higher_region != 99) %>%
+  select(ags, year, afd_share, eligible_voters)
+
+ep_panel <- bind_rows(
+  ep_afd_2014,
+  ep_panel_2019,
+  ep_panel_2024
+) %>%
+  arrange(ags, year)
+
+count(ep_panel, year)
+
+ep_panel %>%
+  arrange(ags, year) %>%
+  print(n = 20)
+```
+
+# Refugee/Asylum seeker data
+
+```{r}
+library(readxl)
+
+Genesis <- read_excel("/Users/diananichvoloda/Library/CloudStorage/GoogleDrive-diananichvoloda@college.harvard.edu/My Drive/2025-2026/Econ 1425/PAPER/DATA/12531-0043_en.xlsx", skip = 5)
+
+#Getting rid of excess columns 
+Genesis <- Genesis %>%
+  select(
+    -5,
+    -7,
+    -9,
+    -11,
+    -13,
+    -15,
+    -17,
+    -19,
+    -21,
+    -23,
+    -25,
+    -27,
+    -29,
+    -31,
+    -33,
+    -35,
+    -37,
+    -39,
+    -41,
+    -43
+  )
+
+library(dplyr)
+library(stringr)
+
+male_cols   <- grep("^Male",   names(Genesis), value = TRUE)
+female_cols <- grep("^Female", names(Genesis), value = TRUE)
+
+Genesis2 <- Genesis %>%
+  mutate(
+    across(all_of(c(male_cols, female_cols)),
+           ~ as.numeric(replace(as.character(.x), .x == "-", NA)))
+  ) %>%
+  mutate(
+    Male   = rowSums(across(all_of(male_cols)),   na.rm = TRUE),
+    Female = rowSums(across(all_of(female_cols)), na.rm = TRUE)
+  ) %>%
+  select(-all_of(c(male_cols, female_cols)))
+
+dates_in_col1 <- Genesis2$`...1`[grepl("^\\d{4}-\\d{2}-\\d{2}$", Genesis2$`...1`)]
+sort(unique(dates_in_col1))
+length(unique(dates_in_col1))
+```
+
+```{r}
+Genesis_2007 <- read_excel("/Users/diananichvoloda/Library/CloudStorage/GoogleDrive-diananichvoloda@college.harvard.edu/My Drive/2025-2026/Econ 1425/PAPER/DATA/Ukraine/Ukraine_2007.xlsx", skip = 5)
+
+Genesis_2015 <- read_excel("/Users/diananichvoloda/Library/CloudStorage/GoogleDrive-diananichvoloda@college.harvard.edu/My Drive/2025-2026/Econ 1425/PAPER/DATA/Ukraine/Ukraine_2015.xlsx", skip = 5)
+
+```
+
+# Ukraine - Panel Data
+
+```{r}
+library(readxl)
+library(dplyr)
+library(stringr)
+library(purrr)
+
+files <- list.files(
+  "/Users/diananichvoloda/Library/CloudStorage/GoogleDrive-diananichvoloda@college.harvard.edu/My Drive/2025-2026/Econ 1425/PAPER/DATA/Ukraine/",
+  pattern = "Ukraine_.*\\.xlsx$",
+  full.names = TRUE
+)
+
+files
+
+ukraine_panel <- map_dfr(files, function(f) {
+  
+  # Extract year from filename
+  year <- str_extract(basename(f), "\\d{4}") %>% as.numeric()
+  
+  # Read file (adjust skip if needed)
+  df <- read_excel(f, skip = 5)
+  
+  # Add year column
+  df <- df %>%
+    mutate(year = year)
+  
+  return(df)
+})
+
+ukraine_panel <- ukraine_panel %>%
+  relocate(year, .after = 2)
+
+ukraine_panel <- ukraine_panel %>%
+  rename(AGS = `...1`) %>%
+  rename(Country = `...3`) 
+
+ukraine_panel <- ukraine_panel %>%
+  rename(AGS_name = `...2`) 
+
+ukraine_panel <- ukraine_panel %>%
+  mutate(AGS = as.character(AGS))
+
+ukraine_panel <- ukraine_panel %>%
+  filter(grepl("^\\d{5}$", AGS))
+
+#Summing male and female
+ukraine_panel <- ukraine_panel %>%
+  # Replace "-" with NA
+  mutate(across(matches("^Male|^Female"),
+                ~na_if(.x, "-"))) %>%
+  
+  # Convert to numeric
+  mutate(across(matches("^Male|^Female"),
+                as.numeric))
+
+ukraine_panel <- ukraine_panel %>%
+  mutate(
+    Ukraine_total = rowSums(across(matches("^Male|^Female")),
+                            na.rm = TRUE)
+  )
+
+ukraine_panel <- ukraine_panel %>%
+  select(AGS, AGS_name, year, Country, Ukraine_total)
+```
+
+# Syria - Panel Data
+
+```{r}
+library(readxl)
+library(dplyr)
+library(stringr)
+library(purrr)
+
+files <- list.files(
+  "/Users/diananichvoloda/Library/CloudStorage/GoogleDrive-diananichvoloda@college.harvard.edu/My Drive/2025-2026/Econ 1425/PAPER/DATA/Syria/",
+  pattern = "Syria_.*\\.xlsx$",
+  full.names = TRUE
+)
+
+files
+
+syria_panel <- map_dfr(files, function(f) {
+  
+  # Extract year from filename
+  year <- str_extract(basename(f), "\\d{4}") %>% as.numeric()
+  
+  # Read file (adjust skip if needed)
+  df <- read_excel(f, skip = 5)
+  
+  # Add year column
+  df <- df %>%
+    mutate(year = year)
+  
+  return(df)
+})
+
+syria_panel <- syria_panel %>%
+  relocate(year, .after = 2)
+
+syria_panel <- syria_panel %>%
+  rename(AGS = `...1`) %>%
+  rename(Country = `...3`) 
+
+syria_panel <- syria_panel %>%
+  rename(AGS_name = `...2`) 
+
+syria_panel <- syria_panel %>%
+  mutate(AGS = as.character(AGS))
+
+syria_panel <- syria_panel %>%
+  filter(grepl("^\\d{5}$", AGS))
+
+#Summing male and female
+syria_panel <- syria_panel %>%
+  # Replace "-" with NA
+  mutate(across(matches("^Male|^Female"),
+                ~na_if(.x, "-"))) %>%
+  
+  # Convert to numeric
+  mutate(across(matches("^Male|^Female"),
+                as.numeric))
+
+syria_panel <- syria_panel %>%
+  mutate(
+    Syria_total = rowSums(across(matches("^Male|^Female")),
+                            na.rm = TRUE)
+  )
+
+syria_panel <- syria_panel %>%
+  select(AGS, AGS_name, year, Country, Syria_total)
+```
+
+# Merging
+
+```{r}
+syria_panel$AGS    <- as.character(syria_panel$AGS)
+ukraine_panel$AGS  <- as.character(ukraine_panel$AGS)
+
+syria_panel$year   <- as.numeric(syria_panel$year)
+ukraine_panel$year <- as.numeric(ukraine_panel$year)
+
+#syria_panel   <- syria_panel %>% select(-Country)
+#ukraine_panel <- ukraine_panel %>% select(-Country)
+
+refugee_panel <- full_join(
+  syria_panel,
+  ukraine_panel,
+  by = c("AGS", "AGS_name", "year")
+)
+
+#refugee_panel <- refugee_panel %>%
+  #mutate(
+    #Syria_total    = ifelse(is.na(Syria_total), 0, Syria_total),
+    #ukraine_total  = ifelse(is.na(ukraine_total), 0, Ukraine_total)
+  #)
+
+#For election synchronization
+# =========================
+# Refugee stocks -> 4-year "cumulative inflow" proxy (NET CHANGE) by election year
+# Window = (t-4) ... t, implemented as Stock_t - Stock_(t-4)
+# Election years: 2013, 2017, 2021, 2025
+# =========================
+
+library(dplyr)
+
+# ---- 0) Set election years ----
+election_years <- c(2013L, 2017L, 2021L, 2025L)
+
+# ---- 1) Clean refugee panel types (AGS as 5-char string, year as integer) ----
+# Assumes refugee_panel has columns: AGS, year, Syria_total, Ukraine_total
+refugee_panel_clean <- refugee_panel %>%
+  mutate(
+    AGS = sprintf("%05s", as.character(AGS)),
+    ref_year = as.integer(as.character(year))
+  ) %>%
+  select(AGS, ref_year, Syria_total, Ukraine_total)
+
+# ---- 2) Get stocks at election year t (but for 2025 use 2024 as the last available refugee year) ----
+stock_t <- refugee_panel_clean %>%
+  filter(ref_year %in% c(2013L, 2017L, 2021L, 2024L)) %>%  # 2025 -> use 2024
+  transmute(
+    AGS,
+    elec_year = if_else(ref_year == 2024L, 2025L, ref_year),  # relabel 2024 as election year 2025
+    syria_stock_t = Syria_total,
+    ukraine_stock_t = Ukraine_total
+  ) %>%
+  filter(elec_year %in% election_years)
+
+# ---- 3) Get stocks at (t-4) for 2013/2017/2021, and at (2021) for 2025 (i.e., 3-year diff: 2024 - 2021) ----
+stock_t4 <- refugee_panel_clean %>%
+  filter(ref_year %in% c(2009L, 2013L, 2017L, 2021L)) %>%
+  transmute(
+    AGS,
+    elec_year = ref_year + 4L,                               # 2009->2013, 2013->2017, 2017->2021, 2021->2025
+    syria_stock_t4 = Syria_total,
+    ukraine_stock_t4 = Ukraine_total
+  ) %>%
+  filter(elec_year %in% election_years)
+
+# ---- 4) Compute net change:
+# 2013/2017/2021: Stock_t - Stock_(t-4)
+# 2025:           Stock_2024 - Stock_2021  (since last refugee year is 2024)
+ref_4yr_net <- stock_t %>%
+  left_join(stock_t4, by = c("AGS", "elec_year")) %>%
+  mutate(
+    syria_net_4yr = syria_stock_t - syria_stock_t4,
+    ukraine_net_4yr = ukraine_stock_t - ukraine_stock_t4,
+    window_years = if_else(elec_year == 2025L, 3L, 4L)        # optional: keeps track of window length
+  ) %>%
+  select(
+    AGS,
+    year = elec_year,
+    syria_net_4yr,
+    ukraine_net_4yr,
+    window_years
+  )
+
+# ---- 5) Clean election panel key + merge ----
+# Assumes fed_county has columns: county (or AGS) and year
+election_panel_clean <- fed_county %>%
+  mutate(
+    AGS = sprintf("%05s", as.character(county)),
+    year = as.integer(as.character(year))
+  )
+
+merged_panel <- election_panel_clean %>%
+  left_join(ref_4yr_net, by = c("AGS", "year"))
+
+merged_panel <- merged_panel %>%
+  relocate(AGS, .after = 1) %>%
+  relocate(syria_net_4yr, .after = 2) %>%
+  relocate(ukraine_net_4yr, .after = 3) 
+
+merged_panel <- merged_panel %>%
+  relocate(state, .after = 6)
+```
+
+\*\*Leading up to 2025 we only use refugee net inflow from 2021 to 2024, since that is the last available year of the Genesis data
+
+EP Elections
+
+```{r}
+library(dplyr)
+
+# ---- 0) Define EP election years and their baseline years ----
+ep_year_map <- tibble(
+  year = c(2014L, 2019L, 2024L),
+  base_year = c(2010L, 2015L, 2020L)
+)
+
+# ---- 1) Clean refugee panel ----
+refugee_panel_clean <- refugee_panel_clean %>%
+  mutate(
+    AGS = sprintf("%05s", as.character(AGS)),
+    ref_year = as.integer(ref_year)
+  ) %>%
+  select(AGS, ref_year, Syria_total, Ukraine_total)
+
+# ---- 2) Get stock at election year t ----
+stock_t <- refugee_panel_clean %>%
+  inner_join(ep_year_map, by = c("ref_year" = "year")) %>%
+  transmute(
+    AGS,
+    year = ref_year,
+    syria_stock_t = Syria_total,
+    ukraine_stock_t = Ukraine_total,
+    base_year
+  )
+
+# ---- 3) Get stock at baseline (t-4) ----
+stock_t4 <- refugee_panel_clean %>%
+  rename(base_year = ref_year) %>%
+  select(AGS, base_year, Syria_total, Ukraine_total) %>%
+  rename(
+    syria_stock_t4 = Syria_total,
+    ukraine_stock_t4 = Ukraine_total
+  )
+
+# ---- 4) Compute 4-year net inflows ----
+ref_4yr_net <- stock_t %>%
+  left_join(stock_t4, by = c("AGS", "base_year")) %>%
+  mutate(
+    syria_net_4yr = syria_stock_t - syria_stock_t4,
+    ukraine_net_4yr = ukraine_stock_t - ukraine_stock_t4,
+    window_years = 4L
+  ) %>%
+  select(AGS, year, syria_net_4yr, ukraine_net_4yr, window_years)
+
+# ---- 5) Clean EP election panel ----
+ep_panel_clean <- ep_panel %>%
+  mutate(
+    AGS = sprintf("%05s", as.character(ags)),
+    year = as.integer(year)
+  )
+
+# ---- 6) Merge ----
+merged_panel_ep <- ep_panel_clean %>%
+  left_join(ref_4yr_net, by = c("AGS", "year"))
+
+# ---- 7) Optional: reorder columns ----
+merged_panel_ep <- merged_panel_ep %>%
+  relocate(AGS, .after = 1) %>%
+  relocate(ukraine_net_4yr, .after = syria_net_4yr) 
+```
+
+Control variables
+
+```{r}
+
+```
+
+# Full Merging
+
+```{r}
+fed_county <- fed_county %>%
+  mutate(AGS = as.character(county))
+
+refugee_panel <- refugee_panel %>%
+  mutate(AGS = as.character(AGS))
+```
+
+Data on migrants to German countries, on December 31, 2024
+
+Regression 1: German Federal elections
+
+```{r}
+library(fixest)
+merged_panel <- merged_panel %>%
+  mutate(
+    syria_per_voter   = syria_net_4yr / eligible_voters,
+    ukraine_per_voter = ukraine_net_4yr / eligible_voters
+  )
+
+model <- feols(
+  afd ~ syria_per_voter + ukraine_per_voter | AGS + year,
+  data = merged_panel,
+  cluster = ~AGS
+)
+
+summary(model)
+wald(model, "syria_per_voter = ukraine_per_voter")
+```
+
+```         
+```
+
+```{r}
+model4 <- feols(
+  afd ~ syria_per_voter + ukraine_per_voter + unemp_election | AGS + year,
+  data = iv_election_panel,
+  cluster = ~AGS
+)
+
+summary(model4)
+```
+
+Effect of unemployment on elections
+
+```{r}
+model5 <- feols(afd ~ unemp_election | AGS + year, data = iv_election_panel)
+summary(model5)
+```
+
+Regression 2: European Parliamentary Elections
+
+```{r}
+library(fixest)
+merged_panel_ep <- merged_panel_ep %>%
+  mutate(
+    syria_per_voter1   = syria_net_4yr / eligible_voters,
+    ukraine_per_voter1 = ukraine_net_4yr / eligible_voters
+  )
+
+model_ep <- feols(
+  afd_share ~ syria_per_voter1 + ukraine_per_voter1 | AGS + year,
+  data = merged_panel_ep,
+  cluster = ~AGS
+)
+
+model_ep_ukr <- feols(
+  afd_share ~ ukraine_per_voter1 | AGS + year,
+  data = merged_panel_ep,
+  cluster = ~AGS
+)
+
+model_ep_syr <- feols(
+  afd_share ~ syria_per_voter1 | AGS + year,
+  data = merged_panel_ep,
+  cluster = ~AGS
+)
+
+
+library(modelsummary)
+library(gt)
+
+models <- list(
+  "Both" = model_ep,
+  "Ukrainians only" = model_ep_ukr,
+  "Syrians only" = model_ep_syr
+)
+
+modelsummary(
+  models,
+  title = "Table 2: Baseline OLS Estimates of Refugee Exposure and AfD Vote Share, EP Elections",
+  statistic = "({std.error})",
+  stars = c('*' = .1, '**' = .05, '***' = .01),
+  coef_map = c(
+    "syria_per_voter1" = "Syrians per voter",
+    "ukraine_per_voter1" = "Ukrainians per voter"
+  ),
+  
+  # ✅ KEEP ONLY what you want
+  gof_map = data.frame(
+    raw = c("nobs", "r.squared"),
+    clean = c("Observations", "R-squared"),
+    fmt = c(0, 3)
+  ),
+  
+  add_rows = data.frame(
+    term = c("District FE", "Year FE"),
+    Both = c("Yes", "Yes"),
+    `Ukraine only` = c("Yes", "Yes"),
+    `Syria only` = c("Yes", "Yes")
+  )
+)
+table(merged_panel_ep$year)
+```
+
+# Visualizing where immigrants came from
+
+```{r}
+library(sf)
+
+kreise <- st_read("/Users/diananichvoloda/Library/CloudStorage/GoogleDrive-diananichvoloda@college.harvard.edu/My Drive/2025-2026/Econ 1425/PAPER/DATA/vg250_01-01.utm32s.shape.ebenen/vg250_ebenen_0101/VG250_KRS.shp")
+
+names(kreise)
+
+plot(st_geometry(kreise))
+
+ggplot(kreise) +
+  geom_sf(aes(fill = BEZ)) +
+  theme_void() +
+  guides(fill = "none")
+
+library(dplyr)
+library(stringr)
+
+kreise <- kreise %>%
+  mutate(AGS = str_pad(as.character(AGS), 5, pad = "0"))
+
+merged_panel <- merged_panel %>%
+  mutate(AGS = str_pad(as.character(AGS), 5, pad = "0"))
+
+kreise_clean <- kreise %>%
+  mutate(AGS = str_pad(as.character(AGS), 5, pad = "0")) %>%
+  group_by(AGS) %>%
+  summarise(
+    GEN = first(GEN),
+    BEZ = first(BEZ),
+    geometry = st_union(geometry),
+    .groups = "drop"
+  )
+
+kreise_clean %>%
+  count(AGS) %>%
+  filter(n > 1)
+
+merged_panel <- merged_panel %>%
+  mutate(AGS = str_pad(as.character(AGS), 5, pad = "0"))
+
+map_data <- kreise_clean %>%
+  left_join(merged_panel, by = "AGS")
+
+#just syria map 2021
+library(ggplot2)
+
+ggplot(map_data %>% filter(year == 2021)) +
+  geom_sf(aes(fill = syria_net_4yr), color = NA) +
+  scale_fill_gradient(
+    low = "#fee5d9",   # light red
+    high = "#a50f15",  # dark red
+    na.value = "grey90",
+    name = "Net inflow"
+  ) +
+  theme_void()
+
+#biscale map 
+install.packages("biscale")
+library(biscale)
+
+map_bi <- map_data %>%
+  filter(year == 2021) %>%
+  bi_class(
+    x = syria_net_4yr,
+    y = ukraine_net_4yr,
+    style = "quantile",
+    dim = 3
+  )
+
+ggplot(map_bi) +
+  geom_sf(aes(fill = bi_class), color = NA) +
+  bi_scale_fill(pal = "DkBlue", dim = 3) +
+  theme_void()
+
+```
+
+```{r}
+library(dplyr)
+library(ggplot2)
+library(patchwork)
+library(scales)
+
+# Signed log transform
+signed_log <- trans_new(
+  name = "signed_log",
+  transform = function(x) sign(x) * log1p(abs(x)),
+  inverse = function(x) sign(x) * (exp(abs(x)) - 1)
+)
+
+map_2013 <- map_data %>% filter(year == 2013)
+
+# Get symmetric limits
+max_val <- max(
+  abs(map_2013$syria_net_4yr),
+  abs(map_2013$ukraine_net_4yr),
+  na.rm = TRUE
+)
+
+# Syria
+p_syria <- ggplot(map_2013) +
+  geom_sf(aes(fill = syria_net_4yr), color = "black", linewidth = 0.1) +
+  scale_fill_gradient2(
+    low = "#2166ac",      # blue (outflow)
+    mid = "white",
+    high = "#b2182b",     # red (inflow)
+    midpoint = 0,
+    limits = c(-max_val, max_val),
+    trans = signed_log,
+    name = "Net inflow"
+  ) +
+  theme_void() +
+  labs(title = "Syria")
+
+# Ukraine (NOW SAME SCALE STRUCTURE)
+p_ukraine <- ggplot(map_2013) +
+  geom_sf(aes(fill = ukraine_net_4yr), color = "black", linewidth = 0.1) +
+  scale_fill_gradient2(
+    low = "#2166ac",
+    mid = "white",
+    high = "#b2182b",
+    midpoint = 0,
+    limits = c(-max_val, max_val),
+    trans = signed_log,
+    name = "Net inflow"
+  ) +
+  theme_void() +
+  labs(title = "Ukraine")
+
+# Combine
+p_syria + p_ukraine +
+  plot_annotation(
+    title = "Net inflows before the 2013 election",
+    subtitle = "Signed log scale (blue = net outflow, red = net inflow)"
+  )
+```
+
+```{r}
+library(dplyr)
+library(ggplot2)
+library(patchwork)
+library(scales)
+library(grid)
+
+# Signed log transform
+signed_log <- trans_new(
+  name = "signed_log",
+  transform = function(x) sign(x) * log1p(abs(x)),
+  inverse = function(x) sign(x) * (exp(abs(x)) - 1)
+)
+
+map_2013 <- map_data %>% filter(year == 2013)
+
+# Separate limits
+max_syria <- max(abs(map_2013$syria_net_4yr), na.rm = TRUE)
+max_ukraine <- max(abs(map_2013$ukraine_net_4yr), na.rm = TRUE)
+
+# Optional: round nicely
+max_syria <- ceiling(max_syria / 100) * 100
+max_ukraine <- ceiling(max_ukraine / 100) * 100
+
+# Syria map
+p_syria <- ggplot(map_2013) +
+  geom_sf(aes(fill = syria_net_4yr), color = "black", linewidth = 0.1) +
+  scale_fill_gradient2(
+    low = "#2166ac",
+    mid = "white",
+    high = "#b2182b",
+    midpoint = 0,
+    limits = c(-max_syria, max_syria),
+    trans = signed_log,
+    breaks = c(-max_syria, max_syria),
+    labels = comma(c(-max_syria, max_syria)),
+    name = "Net inflow",
+    guide = guide_colorbar(
+      barheight = unit(3, "cm"),
+      barwidth = unit(0.4, "cm"),
+      ticks = FALSE
+    )
+  ) +
+  labs(title = "Syria") +
+  theme_void() +
+  theme(
+    plot.title = element_text(size = 16, hjust = 0.5),
+    legend.position = "right",
+    legend.title = element_text(size = 11),
+    legend.text = element_text(size = 10)
+  )
+
+# Ukraine map
+p_ukraine <- ggplot(map_2013) +
+  geom_sf(aes(fill = ukraine_net_4yr), color = "black", linewidth = 0.1) +
+  scale_fill_gradient2(
+    low = "#2166ac",
+    mid = "white",
+    high = "#b2182b",
+    midpoint = 0,
+    limits = c(-max_ukraine, max_ukraine),
+    trans = signed_log,
+    breaks = c(-max_ukraine, max_ukraine),
+    labels = comma(c(-max_ukraine, max_ukraine)),
+    name = "Net inflow",
+    guide = guide_colorbar(
+      barheight = unit(3, "cm"),
+      barwidth = unit(0.4, "cm"),
+      ticks = FALSE
+    )
+  ) +
+  labs(title = "Ukraine") +
+  theme_void() +
+  theme(
+    plot.title = element_text(size = 16, hjust = 0.5),
+    legend.position = "right",
+    legend.title = element_text(size = 11),
+    legend.text = element_text(size = 10)
+  )
+
+# Combine (NO shared legend)
+p_syria + p_ukraine +
+  plot_annotation(
+    title = "Net inflows before the 2013 election",
+    subtitle = "Signed log scale (blue = net outflow, red = net inflow)"
+  )
+```
+
+2017
+
+```{r}
+library(dplyr)
+library(ggplot2)
+library(patchwork)
+library(scales)
+library(grid)
+
+# Signed log transform
+signed_log <- trans_new(
+  name = "signed_log",
+  transform = function(x) sign(x) * log1p(abs(x)),
+  inverse = function(x) sign(x) * (exp(abs(x)) - 1)
+)
+
+map_2017 <- map_data %>% filter(year == 2017)
+
+# Separate limits
+max_syria <- max(abs(map_2017$syria_net_4yr), na.rm = TRUE)
+max_ukraine <- max(abs(map_2017$ukraine_net_4yr), na.rm = TRUE)
+
+# Optional: round nicely
+max_syria <- ceiling(max_syria / 100) * 100
+max_ukraine <- ceiling(max_ukraine / 100) * 100
+
+# Syria map
+p_syria <- ggplot(map_2017) +
+  geom_sf(aes(fill = syria_net_4yr), color = "black", linewidth = 0.1) +
+  scale_fill_gradient2(
+    low = "#2166ac",
+    mid = "white",
+    high = "#b2182b",
+    midpoint = 0,
+    limits = c(-max_syria, max_syria),
+    trans = signed_log,
+    breaks = c(-max_syria, max_syria),
+    labels = comma(c(-max_syria, max_syria)),
+    name = "Net inflow",
+    guide = guide_colorbar(
+      barheight = unit(3, "cm"),
+      barwidth = unit(0.4, "cm"),
+      ticks = FALSE
+    )
+  ) +
+  labs(title = "Syria") +
+  theme_void() +
+  theme(
+    plot.title = element_text(size = 16, hjust = 0.5),
+    legend.position = "right",
+    legend.title = element_text(size = 11),
+    legend.text = element_text(size = 10)
+  )
+
+# Ukraine map
+p_ukraine <- ggplot(map_2017) +
+  geom_sf(aes(fill = ukraine_net_4yr), color = "black", linewidth = 0.1) +
+  scale_fill_gradient2(
+    low = "#2166ac",
+    mid = "white",
+    high = "#b2182b",
+    midpoint = 0,
+    limits = c(-max_ukraine, max_ukraine),
+    trans = signed_log,
+    breaks = c(-max_ukraine, max_ukraine),
+    labels = comma(c(-max_ukraine, max_ukraine)),
+    name = "Net inflow",
+    guide = guide_colorbar(
+      barheight = unit(3, "cm"),
+      barwidth = unit(0.4, "cm"),
+      ticks = FALSE
+    )
+  ) +
+  labs(title = "Ukraine") +
+  theme_void() +
+  theme(
+    plot.title = element_text(size = 16, hjust = 0.5),
+    legend.position = "right",
+    legend.title = element_text(size = 11),
+    legend.text = element_text(size = 10)
+  )
+
+# Combine (NO shared legend)
+p_syria + p_ukraine +
+  plot_annotation(
+    title = "Net inflows before the 2017 election",
+    subtitle = "Signed log scale (blue = net outflow, red = net inflow)"
+  )
+```
+
+2021
+
+```{r}
+library(dplyr)
+library(ggplot2)
+library(patchwork)
+library(scales)
+library(grid)
+
+# Signed log transform
+signed_log <- trans_new(
+  name = "signed_log",
+  transform = function(x) sign(x) * log1p(abs(x)),
+  inverse = function(x) sign(x) * (exp(abs(x)) - 1)
+)
+
+map_2021 <- map_data %>% filter(year == 2021)
+
+# Separate limits
+max_syria <- max(abs(map_2021$syria_net_4yr), na.rm = TRUE)
+max_ukraine <- max(abs(map_2021$ukraine_net_4yr), na.rm = TRUE)
+
+# Optional: round nicely
+max_syria <- ceiling(max_syria / 100) * 100
+max_ukraine <- ceiling(max_ukraine / 100) * 100
+
+# Syria map
+p_syria <- ggplot(map_2021) +
+  geom_sf(aes(fill = syria_net_4yr), color = "black", linewidth = 0.1) +
+  scale_fill_gradient2(
+    low = "#2166ac",
+    mid = "white",
+    high = "#b2182b",
+    midpoint = 0,
+    limits = c(-max_syria, max_syria),
+    trans = signed_log,
+    breaks = c(-max_syria, max_syria),
+    labels = comma(c(-max_syria, max_syria)),
+    name = "Net inflow",
+    guide = guide_colorbar(
+      barheight = unit(3, "cm"),
+      barwidth = unit(0.4, "cm"),
+      ticks = FALSE
+    )
+  ) +
+  labs(title = "Syria") +
+  theme_void() +
+  theme(
+    plot.title = element_text(size = 16, hjust = 0.5),
+    legend.position = "right",
+    legend.title = element_text(size = 11),
+    legend.text = element_text(size = 10)
+  )
+
+# Ukraine map
+p_ukraine <- ggplot(map_2021) +
+  geom_sf(aes(fill = ukraine_net_4yr), color = "black", linewidth = 0.1) +
+  scale_fill_gradient2(
+    low = "#2166ac",
+    mid = "white",
+    high = "#b2182b",
+    midpoint = 0,
+    limits = c(-max_ukraine, max_ukraine),
+    trans = signed_log,
+    breaks = c(-max_ukraine, max_ukraine),
+    labels = comma(c(-max_ukraine, max_ukraine)),
+    name = "Net inflow",
+    guide = guide_colorbar(
+      barheight = unit(3, "cm"),
+      barwidth = unit(0.4, "cm"),
+      ticks = FALSE
+    )
+  ) +
+  labs(title = "Ukraine") +
+  theme_void() +
+  theme(
+    plot.title = element_text(size = 16, hjust = 0.5),
+    legend.position = "right",
+    legend.title = element_text(size = 11),
+    legend.text = element_text(size = 10)
+  )
+
+# Combine (NO shared legend)
+p_syria + p_ukraine +
+  plot_annotation(
+    title = "Net inflows before the 2021 election",
+    subtitle = "Signed log scale (blue = net outflow, red = net inflow)"
+  )
+```
+
+2025
+
+```{r}
+library(dplyr)
+library(ggplot2)
+library(patchwork)
+library(scales)
+library(grid)
+
+# Signed log transform
+signed_log <- trans_new(
+  name = "signed_log",
+  transform = function(x) sign(x) * log1p(abs(x)),
+  inverse = function(x) sign(x) * (exp(abs(x)) - 1)
+)
+
+map_2025 <- map_data %>% filter(year == 2025)
+
+# Separate limits
+max_syria <- max(abs(map_2025$syria_net_4yr), na.rm = TRUE)
+max_ukraine <- max(abs(map_2025$ukraine_net_4yr), na.rm = TRUE)
+
+# Optional: round nicely
+max_syria <- ceiling(max_syria / 100) * 100
+max_ukraine <- ceiling(max_ukraine / 100) * 100
+
+# Syria map
+p_syria <- ggplot(map_2025) +
+  geom_sf(aes(fill = syria_net_4yr), color = "black", linewidth = 0.1) +
+  scale_fill_gradient2(
+    low = "#2166ac",
+    mid = "white",
+    high = "#b2182b",
+    midpoint = 0,
+    limits = c(-max_syria, max_syria),
+    trans = signed_log,
+    breaks = c(-max_syria, max_syria),
+    labels = comma(c(-max_syria, max_syria)),
+    name = "Net inflow",
+    guide = guide_colorbar(
+      barheight = unit(3, "cm"),
+      barwidth = unit(0.4, "cm"),
+      ticks = FALSE
+    )
+  ) +
+  labs(title = "Syria") +
+  theme_void() +
+  theme(
+    plot.title = element_text(size = 16, hjust = 0.5),
+    legend.position = "right",
+    legend.title = element_text(size = 11),
+    legend.text = element_text(size = 10)
+  )
+
+# Ukraine map
+p_ukraine <- ggplot(map_2025) +
+  geom_sf(aes(fill = ukraine_net_4yr), color = "black", linewidth = 0.1) +
+  scale_fill_gradient2(
+    low = "#2166ac",
+    mid = "white",
+    high = "#b2182b",
+    midpoint = 0,
+    limits = c(-max_ukraine, max_ukraine),
+    trans = signed_log,
+    breaks = c(-max_ukraine, max_ukraine),
+    labels = comma(c(-max_ukraine, max_ukraine)),
+    name = "Net inflow",
+    guide = guide_colorbar(
+      barheight = unit(3, "cm"),
+      barwidth = unit(0.4, "cm"),
+      ticks = FALSE
+    )
+  ) +
+  labs(title = "Ukraine") +
+  theme_void() +
+  theme(
+    plot.title = element_text(size = 16, hjust = 0.5),
+    legend.position = "right",
+    legend.title = element_text(size = 11),
+    legend.text = element_text(size = 10)
+  )
+
+# Combine (NO shared legend)
+p_syria + p_ukraine +
+  plot_annotation(
+    title = "Net inflows before the 2025 election",
+    subtitle = "Signed log scale (blue = net outflow, red = net inflow)"
+  )
+```
+
+# IV Analysis - Syria
+
+Instrument ​= (national Syrian inflow​) × (EASY state shares) × (County weight)
+
+County Weight
+
+```{r}
+library(dplyr)
+library(readxl)
+library(stringr)
+library(tidyr)
+
+# County_weight_pre = average of all persons seeing protection 2011, 2012, 2013, that went to that AGS, as a share of those who went to that county 
+
+#Persons seeking protection by county
+County_weight <- read_excel("/Users/diananichvoloda/Library/CloudStorage/GoogleDrive-diananichvoloda@college.harvard.edu/My Drive/2025-2026/Econ 1425/PAPER/DATA/Persons Seeking Protection 2011-13.xlsx", skip = 3)
+
+# Identify year rows and extract year
+County_weight <- County_weight %>%
+  mutate(
+    is_year = str_detect(County_weight[[1]], "^\\d{4}-"),
+    year = ifelse(is_year,
+                  substr(County_weight[[1]], 1, 4),
+                  NA_character_)
+  ) %>%
+  fill(year) %>%
+  filter(!is_year)
+
+# Keep AGS, total, year
+df <- County_weight %>%
+  select(AGS = 1, total = 7, year) %>%
+  mutate(
+    AGS = as.character(AGS),
+    total = as.numeric(total),
+    year = as.numeric(year)
+  )
+
+# Average 2011–2013
+county_avg <- df %>%
+  group_by(AGS) %>%
+  summarise(avg_protection = mean(total, na.rm = TRUE), .groups = "drop")
+
+# Compute weights
+county_weights <- county_avg %>%
+  mutate(state = substr(AGS, 1, 2)) %>%
+  group_by(state) %>%
+  mutate(
+    state_total = sum(avg_protection, na.rm = TRUE),
+    county_weight_pre = avg_protection / state_total
+  ) %>%
+  ungroup()
+
+```
+
+Shares of Syrian nationals by county
+
+```{r}
+Syrian_2008 <- read_excel(
+  "/Users/diananichvoloda/Library/CloudStorage/GoogleDrive-diananichvoloda@college.harvard.edu/My Drive/2025-2026/Econ 1425/PAPER/DATA/Syrian_2008.xlsx",
+  skip = 3
+)
+
+Syrian_2008 <- Syrian_2008 %>%
+  rename(
+    AGS = 1,
+    county_name = 2
+  ) %>%
+  
+  # drop the row that contains the reference date
+  filter(!str_detect(AGS, "^\\d{4}-\\d{2}-\\d{2}$")) %>%
+  
+  # keep only valid county rows
+  filter(str_detect(AGS, "^\\d{5}$")) %>%
+  
+  mutate(
+    AGS = str_pad(AGS, width = 5, pad = "0"),
+    state = substr(AGS, 1, 2)
+  ) %>%
+  
+  # turn all non-ID columns into numeric where possible
+  mutate(
+    across(
+      -c(AGS, county_name, state),
+      ~ as.numeric(na_if(as.character(.x), "-"))
+    )
+  ) %>%
+  
+  # total Syrians in each county
+  rowwise() %>%
+  mutate(
+    total_syria = sum(c_across(where(is.numeric)), na.rm = TRUE)
+  ) %>%
+  ungroup() %>%
+  
+  # county share within each state
+  group_by(state) %>%
+  mutate(
+    weight_2008 = total_syria / sum(total_syria, na.rm = TRUE)
+  ) %>%
+  ungroup() %>%
+  
+  select(AGS, county_name, state, total_syria, weight_2008)
+```
+
+```{r}
+#Persons seeking protection by county 2008
+library(readxl)
+library(dplyr)
+library(stringr)
+
+County_weight_2008 <- read_excel(
+  "/Users/diananichvoloda/Library/CloudStorage/GoogleDrive-diananichvoloda@college.harvard.edu/My Drive/2025-2026/Econ 1425/PAPER/DATA/All_refugees_2008.xlsx",
+  skip = 3
+)
+
+County_weight_2008 <- County_weight_2008 %>%
+  rename(
+    AGS = 1,
+    county_name = 2,
+    total = 7
+  ) %>%
+  filter(!str_detect(AGS, "^\\d{4}-\\d{2}-\\d{2}$")) %>%
+  filter(str_detect(AGS, "^\\d{5}$")) %>%
+  mutate(
+    AGS = str_pad(AGS, width = 5, pad = "0"),
+    state = substr(AGS, 1, 2),
+    total = as.numeric(total)
+  ) %>%
+  group_by(state) %>%
+  mutate(
+    weight = total / sum(total, na.rm = TRUE)
+  ) %>%
+  ungroup() %>%
+  select(AGS, state, county_name, total, weight)
+```
+
+National Syrian Inflow
+
+```{r}
+#National Syrian Inflow
+nat_syria <- refugee_panel_clean %>%
+  group_by(ref_year) %>%
+  summarise(
+    nat_syria = sum(Syria_total, na.rm = TRUE),
+    .groups = "drop"
+  )
+```
+
+EASY shares
+
+```{r}
+#Easy shares - percentages used are for 2019 but assumed to be roughly constant over the years
+Easy_shares <- read.csv("/Users/diananichvoloda/Library/CloudStorage/GoogleDrive-diananichvoloda@college.harvard.edu/My Drive/2025-2026/Econ 1425/PAPER/DATA/Distribution quotas according to the Königstein Key for 2019 - Sheet1.csv", skip = 1)
+
+state_lookup <- tibble::tribble(
+  ~state_name, ~state,
+  "Schleswig-Holstein", "01",
+  "Hamburg", "02",
+  "Niedersachsen", "03",
+  "Bremen", "04",
+  "Nordrhein-Westfalen", "05",
+  "Hessen", "06",
+  "Rheinland-Pfalz", "07",
+  "Baden-Württemberg", "08",
+  "Bayern", "09",
+  "Saarland", "10",
+  "Berlin", "11",
+  "Brandenburg", "12",
+  "Mecklenburg-Vorpommern", "13",
+  "Sachsen", "14",
+  "Sachsen-Anhalt", "15",
+  "Thüringen", "16"
+)
+
+Easy_shares <- Easy_shares %>%
+  mutate(
+    quota_state = as.numeric(gsub(",", ".", gsub(" %", "", Quota))) / 100
+  )
+
+Easy_shares <- Easy_shares %>%
+  rename(state_name = Name) %>%
+  left_join(state_lookup, by = "state_name") %>%
+  select(state, state_name, quota_state)
+
+Easy_shares <- Easy_shares %>%
+  arrange(state)
+```
+
+Full Instrument
+
+```{r}
+# 1. Start from your county-year refugee panel
+#panel_iv1 <- refugee_panel_clean %>%
+  
+  # create 2-digit state code from AGS
+  #mutate(state = substr(AGS, 1, 2)) %>%
+
+panel_iv1 <- panel_iv1 %>%
+  select(
+    -ends_with(".x"),
+    -ends_with(".y")
+  )
+
+panel_iv1 <- panel_iv1 %>%
+  mutate(
+    kreis_id = str_pad(kreis_id, 5, pad = "0"),
+    state = substr(kreis_id, 1, 2)
+  ) %>%
+  
+  left_join(
+    County_weight_2008 %>% select(AGS, weight),
+    by = c("kreis_id" = "AGS")
+  ) %>%
+  
+  left_join(
+    nat_syria %>% select(ref_year, nat_syria),
+    by = c("year" = "ref_year")
+  ) %>%
+  
+  left_join(
+    Easy_shares %>% select(state, quota_state),
+    by = "state"
+  )
+  
+panel_iv1 <- panel_iv1 %>%
+  mutate(
+    z_syria = nat_syria * quota_state * weight
+  )
+```
+
+```{r}
+panel_iv1 <- panel_iv1 %>%
+  left_join(nat_syria, by = c("year" = "ref_year")) %>%
+  left_join(
+    smerged_2008 %>% select(kreis_id, syr_share),
+    by = "kreis_id"
+  ) %>%
+  left_join(
+    Easy_shares %>% select(state, quota_state),
+    by = "state"
+  ) %>%
+  mutate(
+    z_syria = nat_syria.y * quota_state.y * syr_share
+  )
+```
+
+```{r}
+panel_iv1 <- panel_iv1 %>%
+  left_join(
+    Syrian_2008 %>% select(AGS, total_syria, weight_2008),
+    by = c("kreis_id" = "AGS")
+  )
+
+panel_iv1 <- panel_iv1 %>%
+  mutate(
+    z_syria_2008 = nat_syria * quota_state * weight_2008
+  )
+```
+
+Performing the IV
+
+```{r}
+#Does predicted 4-year Syrian inflow per voter explain actual 4-year Syrian inflow per voter?
+
+library(dplyr)
+
+election_years <- c(2013L, 2017L, 2021L, 2025L)
+
+# predicted stock at election year t
+z_stock_t <- panel_iv1 %>%
+  mutate(
+    AGS = as.character(kreis_id),
+    year = as.integer(year)
+  ) %>%
+  filter(year %in% c(2013L, 2017L, 2021L, 2024L)) %>%
+  transmute(
+    AGS,
+    elec_year = if_else(year == 2024L, 2025L, year),
+    z_syria_t = z_syria
+  ) %>%
+  filter(elec_year %in% election_years)
+
+# predicted stock at t-4
+z_stock_t4 <- panel_iv1 %>%
+  mutate(
+    AGS = as.character(kreis_id),
+    year = as.integer(year)
+  ) %>%
+  filter(year %in% c(2009L, 2013L, 2017L, 2021L)) %>%
+  transmute(
+    AGS,
+    elec_year = year + 4L,
+    z_syria_t4 = z_syria
+  ) %>%
+  filter(elec_year %in% election_years)
+
+# predicted 4-year net change
+z_ref_4yr_net <- z_stock_t %>%
+  left_join(z_stock_t4, by = c("AGS", "elec_year")) %>%
+  mutate(
+    z_syria_net_4yr = z_syria_t - z_syria_t4,
+    window_years = if_else(elec_year == 2025L, 3L, 4L)
+  ) %>%
+  transmute(
+    AGS,
+    year = elec_year,
+    z_syria_net_4yr,
+    window_years
+  )
+
+# merge onto election panel
+iv_election_panel <- merged_panel %>%
+  mutate(
+    AGS = as.character(AGS),
+    year = as.integer(year)
+  ) %>%
+  left_join(z_ref_4yr_net, by = c("AGS", "year")) %>%
+  mutate(
+    syria_per_voter = syria_net_4yr / eligible_voters,
+    z_syria_per_voter = z_syria_net_4yr / eligible_voters
+  )
+```
+
+```{r}
+
+election_years <- c(2013L, 2017L, 2021L, 2025L)
+
+# predicted stock at election year t
+z_stock_t <- panel_iv1 %>%
+  mutate(
+    AGS = as.character(kreis_id),
+    year = as.integer(year)
+  ) %>%
+  filter(year %in% c(2013L, 2017L, 2021L, 2024L)) %>%
+  transmute(
+    AGS,
+    elec_year = if_else(year == 2024L, 2025L, year),
+    z_syria_2008_t = z_syria_2008
+  ) %>%
+  filter(elec_year %in% election_years)
+
+# predicted stock at t-4
+z_stock_t4 <- panel_iv1 %>%
+  mutate(
+    AGS = as.character(kreis_id),
+    year = as.integer(year)
+  ) %>%
+  filter(year %in% c(2009L, 2013L, 2017L, 2021L)) %>%
+  transmute(
+    AGS,
+    elec_year = year + 4L,
+    z_syria_2008_t4 = z_syria_2008
+  ) %>%
+  filter(elec_year %in% election_years)
+
+# predicted 4-year net change
+z_ref_4yr_net <- z_stock_t %>%
+  left_join(z_stock_t4, by = c("AGS", "elec_year")) %>%
+  mutate(
+    z_syria_2008_net_4yr = z_syria_2008_t - z_syria_2008_t4,
+    window_years = if_else(elec_year == 2025L, 3L, 4L)
+  ) %>%
+  transmute(
+    AGS,
+    year = elec_year,
+    z_syria_2008_net_4yr,
+    window_years
+  )
+
+# merge onto election panel
+iv_election_panel <- merged_panel %>%
+  mutate(
+    AGS = as.character(AGS),
+    year = as.integer(year)
+  ) %>%
+  left_join(z_ref_4yr_net, by = c("AGS", "year")) %>%
+  mutate(
+    syria_per_voter = syria_net_4yr / eligible_voters,
+    z_syria_2008_per_voter = z_syria_2008_net_4yr / eligible_voters
+  )
+```
+
+## State level IV
+
+```{r}
+library(dplyr)
+
+iv_election_panel_state <- iv_election_panel %>%
+  mutate(
+    afd_votes = afd * valid_votes,
+    syria_net_4yr_implied = syria_per_voter * eligible_voters,
+    z_syria_net_4yr_implied = z_syria_per_voter * eligible_voters
+  ) %>%
+  group_by(state, year) %>%
+  summarise(
+    eligible_voters = sum(eligible_voters, na.rm = TRUE),
+    number_voters   = sum(number_voters, na.rm = TRUE),
+    valid_votes     = sum(valid_votes, na.rm = TRUE),
+
+    afd_votes       = sum(afd_votes, na.rm = TRUE),
+    syria_net_4yr   = sum(syria_net_4yr_implied, na.rm = TRUE),
+    z_syria_net_4yr = sum(z_syria_net_4yr_implied, na.rm = TRUE),
+
+    .groups = "drop"
+  ) %>%
+  mutate(
+    afd = afd_votes / valid_votes,
+    turnout = number_voters / eligible_voters,
+    syria_per_voter = syria_net_4yr / eligible_voters,
+    z_syria_per_voter = z_syria_net_4yr / eligible_voters
+  ) %>%
+  arrange(state, year)
+
+```
+
+Regression
+
+```{r}
+library(lfe)
+
+iv_syria_state <- felm(
+  afd ~ 1 | state + year | (syria_per_voter ~ z_syria_per_voter) | state,
+  data = iv_election_panel_state
+)
+
+summary(iv_syria_state)
+summary(iv_syria_state, stage = 1)
+```
+
+# Importing One dataset
+
+Importing data
+
+```{r}
+iv_election_panel1 <- read.csv("/Users/diananichvoloda/Desktop/iv_election_panel.csv")
+
+iv_total <- read.csv("/Users/diananichvoloda/Desktop/iv_total.csv")
+
+iv_total_new <- read.csv("/Users/diananichvoloda/Desktop/iv_total_new.csv")
+```
+
+# IV First Stage - Syria
+
+```{r}
+library(fixest)
+
+# ---- First stage regression ----
+fs_syria <- feols(
+  syria_per_voter ~ z_syria_2008_per_voter | AGS + year,
+  cluster = ~AGS,
+  data = iv_election_panel
+)
+
+summary(fs_syria)
+
+f_test <- wald(fs_syria, "z_syria_2008_per_voter")
+
+print(f_test)
+
+f_stat <- f_test$stat
+f_stat
+```
+
+# IV Second Stage
+
+```{r}
+library(fixest)
+
+iv_syria <- feols(
+  afd ~ 1 | AGS + year | syria_per_voter ~ z_syria_2008_per_voter,
+  cluster = ~AGS,
+  data = iv_total_new_income
+)
+
+summary(iv_syria)
+```
+
+IV all together:
+
+```{r}
+library(lfe)
+
+iv_syria <- felm(
+  afd ~ 1 | AGS + year | (syria_per_voter ~ z_syria_per_voter) | AGS,
+  data = iv_election_panel
+)
+
+summary(iv_syria)
+summary(iv_syria, stage = 1)
+
+
+fs_no_ags <- felm(
+  syria_per_voter ~ z_syria_per_voter | year | 0 | AGS,
+  data = iv_election_panel
+)
+
+summary(fs_no_ags)
+
+fs_no_year <- felm(
+  syria_per_voter ~ z_syria_per_voter | AGS | 0 | AGS,
+  data = iv_election_panel
+) 
+summary(fs_no_year)
+```
+
+```{r}
+library(lfe)
+
+iv_syria_1 <- felm(
+  afd ~ 1 | AGS + year | (syria_per_voter ~ z_syria_per_voter) | state,
+  data = iv_election_panel
+)
+
+summary(iv_syria_1)
+
+first_stage <- felm(
+  syria_per_voter ~ z_syria_per_voter | AGS + year | 0 | state,
+  data = iv_election_panel
+)
+
+summary(first_stage)
+```
+
+Leo's Code
+
+```{r}
+felm(syria_net_4yr ~ z_syria_net_4yr + eligible_voters, data = iv_election_panel) %>% summary()
+summary(felm(syria_net_4yr ~ z_syria_net_4yr + eligible_voters, 
+             data = iv_election_panel))$fstat
+
+```
+
+```{r}
+fs_syria <- feols(
+  syria_per_voter ~ z_syria_per_voter | AGS + year,
+  cluster = ~AGS,
+  data = iv_election_panel
+)
+
+summary(fs_syria)
+f_test <- wald(fs_syria, "z_syria_per_voter")
+```
+
+Other code
+
+```{r}
+felm(afd ~ eligible_voters | 0 | (syria_per_voter ~ z_syria_per_voter), data = iv_election_panel) %>% summary()
+
+felm(afd ~ syria_per_voter, data = iv_election_panel) %>% summary()
+```
+
+Export
+
+```{r}
+write.csv(iv_election_panel, "~/Desktop/iv_total_new.csv", row.names = FALSE)
+
+
+```
+
+# IV Analysis - Ukraine
+
+Instrument ​= (national Ukrainian inflow​) × (2000 shares of Ukrainian nationals by county)
+
+National Ukrainian inflow
+
+```{r}
+#National Ukrainian Inflow
+nat_ukraine <- refugee_panel_clean %>%
+  group_by(ref_year) %>%
+  summarise(
+    nat_ukraine = sum(Ukraine_total, na.rm = TRUE),
+    .groups = "drop"
+  )
+```
+
+Shares of Ukrainian nationals by county
+
+```{r}
+library(dplyr)
+library(readxl)
+library(stringr)
+library(tidyr)
+Pre_inflows <- read_excel("/Users/diananichvoloda/Library/CloudStorage/GoogleDrive-diananichvoloda@college.harvard.edu/My Drive/2025-2026/Econ 1425/PAPER/DATA/Ukrainian_2010.xlsx", skip = 5)
+
+year_value <- as.numeric(str_sub(as.character(Pre_inflows[[1]][1]), 1, 4))
+
+nat_ukraine_2010 <- Pre_inflows[-1, ] %>%
+  rename(
+    kreis_id = ...1,
+    kreis_name = ...2,
+    citizenship = ...3
+  ) %>%
+  mutate(
+    kreis_id = as.character(kreis_id),
+    across(-c(kreis_id, kreis_name, citizenship), ~ as.numeric(gsub("[^0-9.]", "", as.character(.))))
+  ) %>%
+  filter(str_detect(kreis_id, "^\\d{5}$")) %>%
+  rowwise() %>%
+  mutate(ukr_total = sum(c_across(-c(kreis_id, kreis_name, citizenship)), na.rm = TRUE)) %>%
+  ungroup() %>%
+  transmute(
+    kreis_id,
+    kreis_name,
+    year = year_value,
+    ukr_total
+  )
+
+Total_pop <- read_excel("/Users/diananichvoloda/Library/CloudStorage/GoogleDrive-diananichvoloda@college.harvard.edu/My Drive/2025-2026/Econ 1425/PAPER/DATA/Population_2010.xlsx", skip = 4)
+
+Total_pop <- Total_pop %>%
+  rename(
+    kreis_id = ...1,
+    kreis_name = ...2,
+    total_pop = `2010-12-31`
+  ) %>%
+  mutate(
+    kreis_id = as.character(kreis_id)
+  ) %>%
+  select(kreis_id, kreis_name, total_pop)
+
+# 2. Make sure IDs match in the second dataset too
+nat_ukraine_2010 <- nat_ukraine_2010 %>%
+  mutate(
+    kreis_id = as.character(kreis_id)
+  )
+
+# 3. Merge
+merged_2010 <- nat_ukraine_2010 %>%
+  left_join(Total_pop, by = c("kreis_id", "kreis_name"))
+
+# 4. Create share if you want
+merged_2010 <- merged_2010 %>%
+  mutate(
+    ukr_total = as.numeric(ukr_total),
+    total_pop = as.numeric(gsub("[^0-9.]", "", total_pop)),
+    ukr_share = ukr_total / total_pop
+  )
+```
+
+```{r}
+library(dplyr)
+library(readxl)
+library(stringr)
+library(tidyr)
+Pre_inflows <- read_excel("/Users/diananichvoloda/Library/CloudStorage/GoogleDrive-diananichvoloda@college.harvard.edu/My Drive/2025-2026/Econ 1425/PAPER/DATA/Ukrainian_2008.xlsx", skip = 5)
+
+year_value <- as.numeric(str_sub(as.character(Pre_inflows[[1]][1]), 1, 4))
+
+nat_ukraine_2008 <- Pre_inflows[-1, ] %>%
+  rename(
+    kreis_id = ...1,
+    kreis_name = ...2,
+    citizenship = ...3
+  ) %>%
+  mutate(
+    kreis_id = as.character(kreis_id),
+    across(-c(kreis_id, kreis_name, citizenship), ~ as.numeric(gsub("[^0-9.]", "", as.character(.))))
+  ) %>%
+  filter(str_detect(kreis_id, "^\\d{5}$")) %>%
+  rowwise() %>%
+  mutate(ukr_total = sum(c_across(-c(kreis_id, kreis_name, citizenship)), na.rm = TRUE)) %>%
+  ungroup() %>%
+  transmute(
+    kreis_id,
+    kreis_name,
+    year = year_value,
+    ukr_total
+  )
+
+Total_pop <- read_excel("/Users/diananichvoloda/Library/CloudStorage/GoogleDrive-diananichvoloda@college.harvard.edu/My Drive/2025-2026/Econ 1425/PAPER/DATA/Population_2008.xlsx", skip = 4)
+
+Total_pop <- Total_pop %>%
+  rename(
+    kreis_id = ...1,
+    kreis_name = ...2,
+    total_pop = `2008-12-31`
+  ) %>%
+  mutate(
+    kreis_id = as.character(kreis_id)
+  ) %>%
+  select(kreis_id, kreis_name, total_pop)
+
+# 2. Make sure IDs match in the second dataset too
+nat_ukraine_2008 <- nat_ukraine_2008 %>%
+  mutate(
+    kreis_id = as.character(kreis_id)
+  )
+
+# 3. Merge
+merged_2008 <- nat_ukraine_2008 %>%
+  left_join(Total_pop, by = c("kreis_id", "kreis_name"))
+
+# 4. Create share if you want
+merged_2008 <- merged_2008 %>%
+  mutate(
+    ukr_total = as.numeric(ukr_total),
+    total_pop = as.numeric(gsub("[^0-9.]", "", total_pop)),
+    ukr_share = ukr_total / total_pop
+  )
+```
+
+Constructing the Instrument
+
+```{r}
+library(dplyr)
+library(stringr)
+
+# ------------------------------------------------------------
+# 1. Build predicted stock at election year t
+# ------------------------------------------------------------
+
+election_years <- c(2013L, 2017L, 2021L, 2025L)
+
+z_stock_t <- panel_iv1 %>%
+  mutate(
+    AGS = str_pad(as.character(kreis_id), width = 5, side = "left", pad = "0"),
+    year = as.integer(year)
+  ) %>%
+  filter(year %in% c(2013L, 2017L, 2021L, 2024L)) %>%
+  transmute(
+    AGS,
+    elec_year = if_else(year == 2024L, 2025L, year),
+    z_ukraine_t = z_ukraine
+  ) %>%
+  filter(elec_year %in% election_years)
+
+# ------------------------------------------------------------
+# 2. Build predicted stock at t-4
+# ------------------------------------------------------------
+
+z_stock_t4 <- panel_iv1 %>%
+  mutate(
+    AGS = str_pad(as.character(kreis_id), width = 5, side = "left", pad = "0"),
+    year = as.integer(year)
+  ) %>%
+  filter(year %in% c(2009L, 2013L, 2017L, 2021L)) %>%
+  transmute(
+    AGS,
+    elec_year = year + 4L,
+    z_ukraine_t4 = z_ukraine
+  ) %>%
+  filter(elec_year %in% election_years)
+
+# ------------------------------------------------------------
+# 3. Compute predicted 4-year net change
+# ------------------------------------------------------------
+
+z_ref_4yr_net <- z_stock_t %>%
+  left_join(z_stock_t4, by = c("AGS", "elec_year")) %>%
+  mutate(
+    z_ukraine_net_4yr = z_ukraine_t - z_ukraine_t4,
+    window_years = if_else(elec_year == 2025L, 3L, 4L)
+  ) %>%
+  transmute(
+    AGS,
+    year = elec_year,
+    z_ukraine_net_4yr,
+    window_years
+  )
+
+# ------------------------------------------------------------
+# 4. Merge into your regression panel
+#    IMPORTANT: replace iv_total_new below if your regression
+#    panel has a different name
+# ------------------------------------------------------------
+
+iv_total_new <- iv_total_new %>%
+  select(-any_of(c("z_ukraine_net_4yr", "z_ukraine_per_voter"))) %>%
+  mutate(
+    AGS = str_pad(as.character(AGS), width = 5, side = "left", pad = "0"),
+    year = as.integer(year)
+  ) %>%
+  left_join(
+    z_ref_4yr_net %>% select(AGS, year, z_ukraine_net_4yr),
+    by = c("AGS", "year")
+  ) %>%
+  mutate(
+    ukraine_per_voter = ukraine_net_4yr / eligible_voters,
+    z_ukraine_per_voter = z_ukraine_net_4yr / eligible_voters
+  )
+
+# ------------------------------------------------------------
+# 5. Quick checks
+# ------------------------------------------------------------
+
+str(z_ref_4yr_net)
+str(iv_total_new[, c("eligible_voters", "ukraine_net_4yr", "z_ukraine_net_4yr", "z_ukraine_per_voter")])
+
+write.csv(iv_total_new,
+          "/Users/diananichvoloda/Desktop/iv_total_new.csv",
+          row.names = FALSE)
+```
+
+# IV First Stage - Ukraine
+
+```{r}
+# ---- First stage regression ----
+fs_ukraine <- feols(
+  ukraine_per_voter ~ z_ukraine_per_voter | AGS + year,
+  cluster = ~AGS,
+  data = iv_total_new
+)
+
+summary(fs_ukraine)
+
+f_test <- wald(fs_ukraine, "z_ukraine_per_voter")
+print(f_test)
+f_stat <- f_test$stat
+f_stat
+```
+
+IV Second Stage - Ukraine
+
+```{r}
+iv_ukraine <- feols(
+  afd ~ 1 | AGS + year | ukraine_per_voter ~ z_ukraine_per_voter,
+  cluster = ~AGS,
+  data = iv_total_new
+)
+
+summary(iv_ukraine)
+```
+
+Full IV and Table
+
+```{r}
+# ---- First stage regression ----
+fs_ukraine <- feols(
+  ukraine_per_voter ~ z_ukraine_per_voter | AGS + year,
+  cluster = ~AGS,
+  data = iv_total_new
+)
+
+summary(fs_ukraine)
+
+f_test <- wald(fs_ukraine, "z_ukraine_per_voter")
+print(f_test)
+f_stat <- f_test$stat
+f_stat
+
+iv_ukraine <- feols(
+  afd ~ 1 | AGS + year | ukraine_per_voter ~ z_ukraine_per_voter,
+  cluster = ~AGS,
+  data = iv_total_new
+)
+
+summary(iv_ukraine)
+
+library(modelsummary)
+
+# Extract F-stat
+f_test <- wald(fs_ukraine, "z_ukraine_per_voter")
+f_stat <- round(f_test$stat, 2)
+
+modelsummary(
+  list(
+    "Second Stage" = iv_ukraine,
+    "First Stage"  = fs_ukraine
+  ),
+  title = "Table 4: IV Estimates of the Effect of Ukrainian Refugee Exposure on AfD Vote Share, Federal Elections",
+  
+  statistic = "({std.error})",
+  stars = c('*' = .1, '**' = .05, '***' = .01),
+  
+  coef_map = c(
+    "ukraine_per_voter"      = "Ukrainians per voter",
+    "fit_ukraine_per_voter"  = "Ukrainians per voter",
+    "z_ukraine_per_voter"    = "Ukrainian IV"
+  ),
+  
+  gof_map = data.frame(
+    raw   = c("nobs", "r.squared"),
+    clean = c("Observations", "R-squared"),
+    fmt   = c(0, 3)
+  ),
+  
+  add_rows = data.frame(
+    term = c("District FE", "Year FE", "First-stage F-statistic"),
+    `Second Stage` = c("Yes", "Yes", ""),
+    `First Stage`  = c("Yes", "Yes", f_stat)
+  )
+)
+```
+
+IV using FELM
+
+```{r}
+iv_Ukraine <- felm(
+  afd ~ 1 | AGS + year | (ukraine_per_voter ~ z_ukraine_per_voter) | AGS,
+  data = iv_election_panel
+)
+
+summary(iv_Ukraine)
+```
+
+# Unemployment
+
+```{r}
+library(dplyr)
+library(tidyr)
+library(stringr)
+# 1. Read raw lines
+lines <- readLines("/Users/diananichvoloda/Library/CloudStorage/GoogleDrive-diananichvoloda@college.harvard.edu/My Drive/2025-2026/Econ 1425/PAPER/DATA/Unemployment 2007-25.csv")
+
+# 2. Keep only actual table area
+lines <- lines[8:length(lines)]
+
+# 3. Split manually
+split <- strsplit(lines, ";")
+
+# 4. Make all rows same length
+max_len <- max(lengths(split))
+split <- lapply(split, function(x) {
+  length(x) <- max_len
+  x
+})
+
+# 5. Convert to data frame
+raw_df <- as.data.frame(do.call(rbind, split), stringsAsFactors = FALSE)
+
+# 6. Use row 2 as the real header row
+colnames(raw_df) <- trimws(gsub('"', "", as.character(raw_df[2, ])))
+
+# 7. Drop the empty first row and the header row
+df <- raw_df[-c(1, 2), ]
+
+# 8. Remove columns with missing or blank names
+df <- df[, !(is.na(names(df)) | names(df) == "")]
+
+# 9. Clean all values: remove quotes and trim whitespace
+df[] <- lapply(df, function(x) {
+  trimws(gsub('"', "", x))
+})
+
+# 10. Rename first two columns
+names(df)[1:2] <- c("kreis", "ags8")
+
+# 11. Identify year columns
+year_cols <- names(df)[grepl("^20[0-9]{2}$", names(df))]
+
+# 12. Reshape to long format
+unemployment_long <- df %>%
+  mutate(AGS5 = substr(ags8, 1, 5)) %>%
+  select(AGS5, all_of(year_cols)) %>%
+  pivot_longer(
+    cols = all_of(year_cols),
+    names_to = "year",
+    values_to = "unemp_rate"
+  ) %>%
+  mutate(
+    year = as.integer(year),
+    unemp_rate = as.numeric(str_replace(unemp_rate, ",", "."))
+  ) %>%
+  filter(!is.na(year), year >= 2008, year <= 2024) %>%
+  select(AGS5, year, unemp_rate)
+
+# 13. Check output
+head(unemployment_long)
+View(unemployment_long)
+```
+
+```{r}
+library(dplyr)
+library(tidyr)
+library(stringr)
+
+#unemployment_long <- df %>%
+  #pivot_longer(
+    #cols = -c(kreis, ags8),
+    #names_to = "year",
+    #values_to = "unemp_rate"
+  #) %>%
+  #mutate(
+    #year = as.integer(str_extract(year, "\\d{4}")),
+    #unemp_rate = as.numeric(str_replace(unemp_rate, ",", ".")),
+    #AGS5 = substr(ags8, 1, 5)
+  #) %>%
+  #select(AGS5, year, unemp_rate)
+
+unemp_election <- unemployment_long %>%
+  filter(year %in% c(2008, 2012, 2015, 2016, 2019, 2020, 2023, 2024)) %>%
+  mutate(election_year = case_when(
+    year %in% c(2011, 2012) ~ 2013L,
+    year %in% c(2015, 2016) ~ 2017L,
+    year %in% c(2019, 2020) ~ 2021L,
+    year %in% c(2023, 2024) ~ 2025L
+  )) %>%
+  group_by(AGS5, election_year) %>%
+  summarise(
+    unemp_pre2yr_avg = mean(unemp_rate, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+iv_election_panel <- iv_election_panel %>%
+  left_join(
+    unemp_election,
+    by = c("AGS" = "AGS5", "year" = "election_year")
+  )
+```
+
+```{r}
+iv_total_new <- iv_total_new %>%
+  mutate(AGS = str_pad(AGS, width = 5, side = "left", pad = "0"))
+
+unemp_historic <- unemployment_long %>%
+  filter(year == 2008) %>%
+  transmute(
+    AGS5 = str_pad(AGS5, width = 5, side = "left", pad = "0"),
+    unemp_historic_rate = unemp_rate
+  )
+
+iv_total_new_unemp <- iv_total_new %>%
+  left_join(unemp_historic, by = c("AGS" = "AGS5"))
+
+#iv_election_panel <- iv_election_panel %>%
+  #left_join(
+    #unemp_historic,
+    #by = c("AGS" = "AGS5")
+  #)
+
+#unemp_election_year <- unemployment_long %>%
+  #filter(year %in% c(2013, 2017, 2021, 2025)) %>%
+  #rename(unemp_election = unemp_rate)
+
+#iv_election_panel <- iv_election_panel %>%
+  #left_join(
+    #unemp_election_year,
+    #by = c("AGS" = "AGS5", "year" = "year")
+  #)
+```
+
+```{r}
+iv_election_panel <- iv_election_panel %>%
+  select(-income_historic_2008.y) 
+```
+
+# Income
+
+```{r}
+#Income_kreis <- read_excel("/Users/diananichvoloda/Library/CloudStorage/GoogleDrive-diananichvoloda@college.harvard.edu/My Drive/2025-2026/Econ 1425/PAPER/DATA/Income by Kreis.xlsx")
+library(readxl) 
+path <- "/Users/diananichvoloda/Library/CloudStorage/GoogleDrive-diananichvoloda@college.harvard.edu/My Drive/2025-2026/Econ 1425/PAPER/DATA/Income by Kreis.xlsx"
+
+excel_sheets(path)
+
+#read_excel(path, sheet = "3", n_max = 20, col_names = FALSE)
+
+Income_kreis <- read_excel(path, sheet = "3", skip = 4)
+
+income_historic <- Income_kreis %>%
+  rename(
+    AGS5 = `Regional-schlüssel`
+  ) %>%
+  filter(`NUTS 3` == 3) %>%   # keep only Kreise
+  mutate(
+    AGS5 = as.character(AGS5)
+  ) %>%
+  select(
+    AGS5,
+    income_historic_2008 = `2008`
+  )
+
+iv_total_new_income <- iv_total_new %>%
+  left_join(
+    income_historic,
+    by = c("AGS" = "AGS5")
+  )
+```
+
+# Regressions for Unemployment and Income
+
+Unemployment
+
+```{r}
+model_unemp <- feols(
+  afd ~ syria_per_voter + ukraine_per_voter + ukraine_per_voter:unemp_historic_rate +
+    syria_per_voter:unemp_historic_rate |
+    AGS + year,
+  data = iv_total_new_unemp,
+  cluster = ~AGS 
+)
+
+summary(model_unemp)
+wald(model_unemp, "syria_per_voter = ukraine_per_voter")
+
+vcov_mat <- vcov(model_unemp)
+
+# Function to compute SE of marginal effect
+se_func <- function(var_main, var_inter, unemp, vcov_mat){
+  var <- vcov_mat[var_main, var_main] +
+         (unemp^2) * vcov_mat[var_inter, var_inter] +
+         2 * unemp * vcov_mat[var_main, var_inter]
+  sqrt(var)
+}
+
+df_plot <- data.frame(
+  unemp = unemp_seq,
+  Syria = b1 + b3 * unemp_seq,
+  Ukraine = b2 + b4 * unemp_seq,
+  se_syria = sapply(unemp_seq, function(u)
+    se_func("syria_per_voter",
+            "syria_per_voter:unemp_historic_rate", u, vcov_mat)),
+  se_ukraine = sapply(unemp_seq, function(u)
+    se_func("ukraine_per_voter",
+            "ukraine_per_voter:unemp_historic_rate", u, vcov_mat))
+)
+
+df_plot_long <- df_plot %>%
+  mutate(
+    Syria_low = Syria - 1.96 * se_syria,
+    Syria_high = Syria + 1.96 * se_syria,
+    Ukraine_low = Ukraine - 1.96 * se_ukraine,
+    Ukraine_high = Ukraine + 1.96 * se_ukraine
+  ) %>%
+  pivot_longer(cols = c(Syria, Ukraine),
+               names_to = "Group",
+               values_to = "Effect") %>%
+  mutate(
+    lower = ifelse(Group == "Syria", Syria_low, Ukraine_low),
+    upper = ifelse(Group == "Syria", Syria_high, Ukraine_high)
+  )
+
+ggplot(df_plot_long, aes(x = unemp, y = Effect, color = Group, fill = Group)) +
+  geom_line(size = 1.2) +
+  geom_ribbon(aes(ymin = lower, ymax = upper), alpha = 0.2, color = NA) +
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  labs(
+    x = "2008 Unemployment Rate",
+    y = "Marginal Effect on AfD Vote Share",
+    color = "Refugee Origin",
+    fill = "Refugee Origin",
+    title = "Heterogeneous Effects of Refugee Inflows by Unemployment"
+  ) +
+  theme_minimal(base_size = 14)
+
+```
+
+Just the table:
+
+```{r}
+library(dplyr)
+library(knitr)
+
+model_unemp <- feols(
+  afd ~ syria_per_voter + ukraine_per_voter + 
+    ukraine_per_voter:unemp_historic_rate +
+    syria_per_voter:unemp_historic_rate |
+    AGS + year,
+  data = iv_total_new_unemp,
+  cluster = ~AGS
+)
+
+summary(model_unemp)
+wald(model_unemp, "syria_per_voter = ukraine_per_voter")
+
+library(kableExtra)
+
+kable(
+  table_clean,
+  format = "html",
+  digits = 3,
+  caption = "Marginal Effects of Refugee Inflows on AfD Vote Share"
+) %>%
+  kable_styling(
+    full_width = FALSE,
+    font_size = 12,
+    position = "center"
+  ) %>%
+  row_spec(0,
+           bold = TRUE,
+           extra_css = "font-family: 'Times New Roman', Times, serif; color: black;") %>%
+  column_spec(1:ncol(table_clean),
+              extra_css = "font-family: 'Times New Roman', Times, serif;") %>%
+  add_header_above(
+    c(" " = 3, "Effects on AfD Vote Share" = 3),
+    bold = TRUE,
+    extra_css = "font-family: 'Times New Roman', Times, serif; color: black;"
+  ) %>%
+  kable_styling(
+    bootstrap_options = "striped"
+  ) %>%
+  footnote(general = NULL) %>%
+  # fix caption (title)
+  kableExtra::kable_styling() %>%
+  kableExtra::add_header_above(c(" " = ncol(table_clean))) %>%
+  # override caption style
+  kableExtra::column_spec(1, extra_css = "font-family: 'Times New Roman';")
+
+kable(
+  table_clean,
+  format = "html",
+  digits = 3
+)
+library(htmltools)
+
+tagList(
+  tags$div(
+    "Marginal Effects of Refugee Inflows on AfD Vote Share",
+    style = "
+      font-family: 'Times New Roman', Times, serif;
+      font-weight: bold;
+      color: black;
+      font-size: 18px;
+      margin-bottom: 8px;
+    "
+  ),
+  
+  kable(
+    table_clean,
+    format = "html",
+    digits = 3
+  ) %>%
+    kable_styling(
+      full_width = FALSE,
+      font_size = 12,
+      position = "center"
+    ) %>%
+    row_spec(0, bold = TRUE) %>%
+    add_header_above(c(" " = 3, "Effects on AfD Vote Share" = 3), bold = TRUE)
+)
+```
+
+```{r}
+model_unemp <- feols(
+  afd ~ syria_per_voter + ukraine_per_voter +
+    unemp_historic_rate +
+    syria_per_voter:unemp_historic_rate +
+    ukraine_per_voter:unemp_historic_rate |
+    AGS + year,
+  data = iv_total_new_unemp,
+  cluster = ~AGS 
+)
+```
+
+```{r}
+model_unemp_quad <- feols(
+  afd ~ syria_per_voter + ukraine_per_voter +
+    syria_per_voter:unemp_historic_rate +
+    ukraine_per_voter:unemp_historic_rate +
+    syria_per_voter:I(unemp_historic_rate^2) +
+    ukraine_per_voter:I(unemp_historic_rate^2) |
+    AGS + year,
+  data = iv_total_new_unemp,
+  cluster = ~AGS
+)
+
+summary(model_unemp_quad)
+```
+
+Income
+
+```{r}
+#Income
+
+model_income <- feols(
+  afd ~ syria_per_voter + ukraine_per_voter +
+    syria_per_voter:income_historic_2008 +
+    ukraine_per_voter:income_historic_2008 |
+    AGS + year,
+  data = iv_total_new_income,
+  cluster = ~AGS
+)
+
+summary(model_income)
+wald(model_income, "syria_per_voter = ukraine_per_voter")
+```
+
+Income Graphic
+
+```{r}
+library(dplyr)
+library(knitr)
+
+model_income <- feols(
+  afd ~ syria_per_voter + ukraine_per_voter + 
+    ukraine_per_voter:income_historic_2008 +
+    syria_per_voter:income_historic_2008 |
+    AGS + year,
+  data = iv_total_new_income,
+  cluster = ~AGS
+)
+
+summary(model_income)
+wald(model_income, "syria_per_voter = ukraine_per_voter")
+
+library(kableExtra)
+
+kable(
+  table_clean,
+  format = "html",
+  digits = 3,
+  caption = "Marginal Effects of Refugee Inflows on AfD Vote Share"
+) %>%
+  kable_styling(
+    full_width = FALSE,
+    font_size = 12,
+    position = "center"
+  ) %>%
+  row_spec(0,
+           bold = TRUE,
+           extra_css = "font-family: 'Times New Roman', Times, serif; color: black;") %>%
+  column_spec(1:ncol(table_clean),
+              extra_css = "font-family: 'Times New Roman', Times, serif;") %>%
+  add_header_above(
+    c(" " = 3, "Effects on AfD Vote Share" = 3),
+    bold = TRUE,
+    extra_css = "font-family: 'Times New Roman', Times, serif; color: black;"
+  ) %>%
+  kable_styling(
+    bootstrap_options = NULL
+  ) %>%
+  footnote(general = NULL) %>%
+  # fix caption (title)
+  kableExtra::kable_styling() %>%
+  kableExtra::add_header_above(c(" " = ncol(table_clean))) %>%
+  # override caption style
+  kableExtra::column_spec(1, extra_css = "font-family: 'Times New Roman';")
+
+kable(
+  table_clean,
+  format = "html",
+  digits = 3
+)
+library(htmltools)
+
+tagList(
+  tags$div(
+    "Marginal Effects of Refugee Inflows on AfD Vote Share",
+    style = "
+      font-family: 'Times New Roman', Times, serif;
+      font-weight: bold;
+      color: black;
+      font-size: 18px;
+      margin-bottom: 8px;
+    "
+  ),
+  
+  kable(
+    table_clean,
+    format = "html",
+    digits = 3
+  ) %>%
+    kable_styling(
+      full_width = FALSE,
+      font_size = 12,
+      position = "center"
+    ) %>%
+    row_spec(0, bold = TRUE) %>%
+    add_header_above(c(" " = 3, "Effects on AfD Vote Share" = 3), bold = TRUE)
+)
+```
+
+```{r}
+library(fixest)
+library(dplyr)
+library(tibble)
+library(knitr)
+library(kableExtra)
+
+#--------------------------------------------------
+# 1. Run regression with income interactions
+#--------------------------------------------------
+model_income <- feols(
+  afd ~ syria_per_voter + ukraine_per_voter +
+    syria_per_voter:income_historic_2008 +
+    ukraine_per_voter:income_historic_2008 |
+    AGS + year,
+  data = iv_total_new_income,
+  cluster = ~AGS
+)
+
+summary(model_income)
+wald(model_income, "syria_per_voter = ukraine_per_voter")
+
+#--------------------------------------------------
+# 2. Choose income values: 25th percentile, median, 75th percentile
+#--------------------------------------------------
+income_vals <- quantile(
+  iv_total_new_income$income_historic_2008,
+  probs = c(0.25, 0.50, 0.75),
+  na.rm = TRUE
+)
+
+income_labels <- c("25th percentile", "Median", "75th percentile")
+
+#--------------------------------------------------
+# 3. Extract coefficients and clustered vcov
+#--------------------------------------------------
+b <- coef(model_income)
+V <- vcov(model_income)
+
+#--------------------------------------------------
+# 4. Function to compute marginal effect, SE, and p-value
+#--------------------------------------------------
+get_me <- function(base_var, int_var, z, b, V) {
+  me <- b[base_var] + z * b[int_var]
+
+  se <- sqrt(
+    V[base_var, base_var] +
+      z^2 * V[int_var, int_var] +
+      2 * z * V[base_var, int_var]
+  )
+
+  p <- 2 * (1 - pnorm(abs(me / se)))
+
+  tibble(
+    `Marginal effect` = sprintf("%.3f", me),
+    `Std. error` = sprintf("%.3f", se),
+    `p-value` = sprintf("%.3f", p)
+  )
+}
+
+#--------------------------------------------------
+# 5. Build final table data
+#--------------------------------------------------
+table_income <- bind_rows(
+  lapply(seq_along(income_vals), function(i) {
+    z <- as.numeric(income_vals[i])
+
+    bind_rows(
+      tibble(
+        Origin = "Syria",
+        `Income level` = income_labels[i],
+        `Income value` = sprintf("%.3f", z)
+      ) %>%
+        bind_cols(
+          get_me(
+            "syria_per_voter",
+            "syria_per_voter:income_historic_2008",
+            z, b, V
+          )
+        ),
+
+      tibble(
+        Origin = "Ukraine",
+        `Income level` = income_labels[i],
+        `Income value` = sprintf("%.3f", z)
+      ) %>%
+        bind_cols(
+          get_me(
+            "ukraine_per_voter",
+            "ukraine_per_voter:income_historic_2008",
+            z, b, V
+          )
+        )
+    )
+  })
+) %>%
+  mutate(
+    Origin = factor(Origin, levels = c("Syria", "Ukraine")),
+    `Income level` = factor(
+      `Income level`,
+      levels = c("25th percentile", "Median", "75th percentile")
+    )
+  ) %>%
+  arrange(Origin, `Income level`) %>%
+  mutate(
+    Origin = as.character(Origin),
+    `Income level` = as.character(`Income level`)
+  )
+
+#--------------------------------------------------
+# 6. Render table in Times New Roman with striped rows
+#--------------------------------------------------
+kbl(
+  table_income,
+  format = "html",
+  escape = FALSE,
+  align = c("l", "l", "r", "r", "r", "r"),
+  col.names = c(
+    "Origin",
+    "Income level",
+    "Income value",
+    "Marginal effect",
+    "Std. error",
+    "p-value"
+  )
+) %>%
+  add_header_above(
+    c(" " = 3, "Effects on AfD Vote Share" = 3),
+    extra_css = "font-family: 'Times New Roman', Times, serif; font-weight: bold;"
+  ) %>%
+  kable_styling(
+    full_width = FALSE,
+    position = "center",
+    font_size = 18,
+    bootstrap_options = "striped"
+  ) %>%
+  row_spec(
+    0,
+    bold = TRUE,
+    font_size = 20,
+    extra_css = "
+      font-family: 'Times New Roman', Times, serif;
+      border-bottom: 2px solid #cfcfcf;
+    "
+  ) %>%
+  row_spec(
+    1:nrow(table_income),
+    extra_css = "
+      font-family: 'Times New Roman', Times, serif;
+    "
+  ) %>%
+  column_spec(
+    1:6,
+    extra_css = "
+      font-family: 'Times New Roman', Times, serif;
+    "
+  ) %>%
+  column_spec(1, width = "10em") %>%
+  column_spec(2, width = "18em") %>%
+  column_spec(3, width = "10em") %>%
+  column_spec(4, width = "12em") %>%
+  column_spec(5, width = "10em") %>%
+  column_spec(6, width = "8em")
+```
+
+Quadratic
+
+```{r}
+model_income_quad <- feols(
+  afd ~ syria_per_voter + ukraine_per_voter +
+    syria_per_voter:income_historic_2008 +
+    ukraine_per_voter:income_historic_2008 +
+    syria_per_voter:I(income_historic_2008^2) +
+    ukraine_per_voter:I(income_historic_2008^2) |
+    AGS + year,
+  data = iv_total_new_income,
+  cluster = ~AGS
+)
+
+summary(model_income_quad)
+```
+
+Combined
+
+```{r}
+model_combined <- feols(
+  afd ~ syria_per_voter + ukraine_per_voter +
+    syria_per_voter:income_historic_2008 +
+    ukraine_per_voter:income_historic_2008 +
+    syria_per_voter:unemp_historic_rate +
+    ukraine_per_voter:unemp_historic_rate |
+    AGS + year,
+  data = iv_election_panel,
+  cluster = ~AGS
+)
+
+summary(model_combined)
+model_combined$collin.var
+```
